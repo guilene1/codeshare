@@ -1,5 +1,6 @@
 FROM node:24-bookworm-slim AS build
 WORKDIR /app
+ENV NODE_OPTIONS=--max-old-space-size=1536
 COPY package*.json ./
 COPY frontend/package.json frontend/package.json
 COPY backend/package.json backend/package.json
