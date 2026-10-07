@@ -1,0 +1,23 @@
+{
+  "name": "devshare",
+  "private": true,
+  "workspaces": [
+    "frontend",
+    "backend"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web -c cyan,magenta \"npm run dev -w backend\" \"npm run dev -w frontend\"",
+    "build": "npm run build -w frontend && npm run build -w backend",
+    "typecheck": "npm run typecheck --workspaces",
+    "test": "npm run test -w backend",
+    "test:e2e": "playwright test",
+    "test:load": "node scripts/load-test.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.0",
+    "concurrently": "^9.2.1"
+  },
+  "overrides": {
+    "shell-quote": "^1.12.0"
+  }
+}

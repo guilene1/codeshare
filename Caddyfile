@@ -1,0 +1,41 @@
+{
+  email {$ACME_EMAIL}
+  # Credentials can occur in editor routes or WebSocket subprotocol headers.
+  # Omit request details from runtime/error logs; access logging stays disabled.
+  log default {
+    format filter {
+      wrap json
+      fields {
+        request delete
+        uri delete
+        headers delete
+      }
+    }
+  }
+}
+{$DOMAIN} {
+  encode zstd gzip
+  header {
+    -Server
+    Referrer-Policy no-referrer
+    X-Content-Type-Options nosniff
+    X-Frame-Options DENY
+    Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; img-src 'self' data:; connect-src 'self' ws: wss:; font-src 'self' data:; frame-ancestors 'none'"
+  }
+  @backend path /api /api/* /ws/*
+  handle @backend {
+    reverse_proxy application:3000
+  }
+  @assets path /assets/*
+  handle @assets {
+    root * /srv
+    header Cache-Control "public, max-age=31536000, immutable"
+    file_server
+  }
+  handle {
+    root * /srv
+    header Cache-Control "no-cache"
+    try_files {path} /index.html
+    file_server
+  }
+}

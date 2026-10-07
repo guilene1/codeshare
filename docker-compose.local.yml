@@ -1,0 +1,12 @@
+# Local-only preview. Production deployment uses docker-compose.yml by itself.
+# docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.local.yml -p devshare-local up -d --build
+services:
+  application:
+    environment:
+      ALLOWED_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
+      METRICS_TOKEN: local-preview-metrics-only
+  caddy:
+    ports: !override
+      - "127.0.0.1:8080:80"
+    environment:
+      DOMAIN: ":80"

@@ -1,0 +1,16 @@
+node_modules/
+dist/
+data/
+.env
+*.log
+test-results/
+playwright-report/
+*.sqlite
+*.sqlite-*
+*.sqlite.gz
+.env.*
+!.env.example
+*.pem
+*.key
+.aws/
+load-test-report*.json
