@@ -1,4 +1,6 @@
-FROM node:24-bookworm-slim AS build
+# The build stage emits platform-independent JS/CSS, so it runs natively on the
+# build machine; only the application and web stages target the server platform.
+FROM --platform=$BUILDPLATFORM node:24-bookworm-slim AS build
 WORKDIR /app
 ENV NODE_OPTIONS=--max-old-space-size=1536
 COPY package*.json ./
