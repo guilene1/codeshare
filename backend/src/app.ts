@@ -10,7 +10,14 @@ import { Rooms, addDocument, filename, language } from "./rooms.js";
 import { setupWebsocket } from "./websocket.js";
 import * as Y from "yjs";
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { hashEditorToken, TOKEN_PATTERN } from "./access.js";
+import {
+  hashEditorToken,
+  TOKEN_PATTERN,
+  workspaceAccess,
+} from "./access.js";
+import { Accounts, csrfFor, equalSecret, newToken, type Session } from "./auth.js";
+import { accountRoutes, authLimits, type AuthLimits } from "./accountRoutes.js";
+import { migrateSnippets } from "./migrate.js";
 import { templates } from "./templates.js";
 import {
   blockFields,
@@ -27,6 +34,8 @@ export function createApp(
     origins?: string[];
     checkpointMs?: number;
     staticPath?: string;
+    cookieSecure?: boolean;
+    authLimits?: Partial<AuthLimits>;
   } = {},
 ) {
   const projectRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -46,6 +55,14 @@ export function createApp(
       )
         .split(",")
         .map((s) => s.trim()),
+  );
+  // Secure cookies by default in production; the plain-HTTP local preview opts out.
+  const accounts = new Accounts(
+    rooms.db,
+    options.cookieSecure ??
+      (process.env.COOKIE_SECURE !== undefined
+        ? process.env.COOKIE_SECURE === "1"
+        : process.env.NODE_ENV === "production"),
   );
   const app = express();
   app.disable("x-powered-by");
@@ -98,6 +115,29 @@ export function createApp(
     }
     next();
   });
+  // Resolve the session cookie. Cookie-authenticated writes need an allowed Origin and
+  // the per-session CSRF token header (SameSite=Lax alone is not relied upon).
+  app.use("/api", (req, res, next) => {
+    const token = accounts.tokenFrom(req);
+    const session = accounts.session(token);
+    if (token && !session) res.append("Set-Cookie", accounts.clearCookie());
+    res.locals.session = session;
+    if (session && !["GET", "HEAD", "OPTIONS"].includes(req.method)) {
+      const supplied = req.headers["x-csrf-token"];
+      if (
+        !req.headers.origin ||
+        !origins.has(req.headers.origin) ||
+        typeof supplied !== "string" ||
+        !equalSecret(supplied, csrfFor(session.token))
+      ) {
+        res.status(403).json({
+          error: "Your session check failed. Refresh the page and try again.",
+        });
+        return;
+      }
+    }
+    next();
+  });
   app.get("/api/health", (_req, res) => res.json({ status: "ok" }));
   app.get("/api/metrics", (req, res) => {
     const expected = process.env.METRICS_TOKEN;
@@ -130,6 +170,10 @@ export function createApp(
       ),
     });
   });
+  accountRoutes(app, accounts, rooms, origins, {
+    ...authLimits(),
+    ...options.authLimits,
+  });
   app.post(
     "/api/rooms",
     rateLimit({
@@ -139,14 +183,12 @@ export function createApp(
       legacyHeaders: false,
     }),
     (req, res) => {
-      if (
-        typeof req.body.editorTokenHash !== "string" ||
-        !/^[a-f0-9]{64}$/.test(req.body.editorTokenHash)
-      ) {
-        res.status(400).json({
-          error:
-            "A secure editor credential is required to create a workspace. Refresh the page and try again.",
-        });
+      // Every new workspace has an owner.
+      const session = res.locals.session as Session | undefined;
+      if (!session) {
+        res
+          .status(401)
+          .json({ error: "Sign in or create an account to create a workspace." });
         return;
       }
       const name = req.body.name ?? "Untitled workspace";
@@ -164,9 +206,10 @@ export function createApp(
       const room = rooms.create(
         name.trim(),
         language(req.body.language ?? "hcl"),
-        req.body.editorTokenHash,
+        null,
         req.body.template,
         description.trim(),
+        session.user.id,
       );
       res.status(201).json({ id: room.id, name: room.name });
     },
@@ -190,17 +233,30 @@ export function createApp(
     room.touched = Date.now();
     res.locals.workspace = room;
     const credential = req.headers.authorization?.match(/^Bearer (.+)$/)?.[1];
-    const canEdit =
-      !!credential &&
-      TOKEN_PATTERN.test(credential) &&
-      rooms.canEditHash(room.id as string, hashEditorToken(credential));
-    if (req.headers.authorization && !canEdit) {
+    const tokenHash =
+      credential && TOKEN_PATTERN.test(credential)
+        ? hashEditorToken(credential)
+        : undefined;
+    const linkValid = rooms.canEditHash(room.id as string, tokenHash);
+    if (req.headers.authorization && !linkValid) {
       res.status(403).json({
         error: "This private editor link is invalid or has been revoked.",
       });
       return;
     }
-    res.locals.canEdit = canEdit;
+    const session = res.locals.session as Session | undefined;
+    const access = workspaceAccess(
+      rooms.db,
+      (hash, user) => accounts.sessionValid(hash, user),
+      room.id as string,
+      { userId: session?.user.id, sessionHash: session?.tokenHash, tokenHash },
+    );
+    res.locals.access = access;
+    res.locals.linkValid = linkValid;
+    res.locals.canEdit = access !== "viewer";
+    // Owners manage their workspace; unclaimed legacy workspaces keep v1 link management.
+    res.locals.canManage =
+      access === "owner" || (access === "editor" && !room.owner_id);
     next();
   });
   app.get("/api/rooms/:roomId", (_req, res) => {
@@ -209,21 +265,28 @@ export function createApp(
       id: room.id,
       name: room.name,
       description: room.description,
-      access: res.locals.canEdit ? "editor" : "viewer",
+      access: res.locals.access,
+      owned: !!room.owner_id,
+      // A valid editor link for an unowned workspace can be claimed once.
+      claimable: !room.owner_id && res.locals.linkValid,
+      ...(res.locals.access === "owner"
+        ? { hasEditorLink: !!room.has_editor_link }
+        : {}),
     });
   });
   app.get("/api/rooms/:roomId/summary", (_req, res) => {
-    if (!res.locals.canEdit) {
-      res
-        .status(403)
-        .json({
-          error: "Private editor access is required for My Workspaces.",
-        });
+    if (!res.locals.canManage) {
+      res.status(404).json({ error: "Workspace not found." });
       return;
     }
     const id = res.locals.workspace.id;
+    const info = rooms.info(id)!;
     res.json({
-      ...rooms.info(id),
+      id: info.id,
+      name: info.name,
+      description: info.description,
+      created_at: info.created_at,
+      updated_at: info.updated_at,
       files: Number(
         rooms.db
           .prepare("SELECT COUNT(*) AS n FROM documents WHERE room_id=?")
@@ -256,7 +319,92 @@ export function createApp(
     }
     next();
   });
-  app.patch("/api/rooms/:roomId", (req, res) => {
+  // Ownership and link management: owners only (or the v1 link of an unclaimed workspace).
+  app.post("/api/rooms/:roomId/claim", (_req, res) => {
+    const session = res.locals.session as Session | undefined;
+    const room = res.locals.workspace;
+    if (!session) {
+      res
+        .status(401)
+        .json({ error: "Sign in to add this workspace to your account." });
+      return;
+    }
+    if (room.owner_id === session.user.id) {
+      res.json({ ok: true });
+      return;
+    }
+    if (!res.locals.linkValid) {
+      res.status(403).json({
+        error: "Open the workspace with its private editor link to claim it.",
+      });
+      return;
+    }
+    // Atomic one-time claim: only succeeds while the workspace has no owner.
+    const claimed = rooms.db
+      .prepare("UPDATE rooms SET owner_id=? WHERE id=? AND owner_id IS NULL")
+      .run(session.user.id, room.id).changes;
+    if (!claimed) {
+      res
+        .status(409)
+        .json({ error: "This workspace already belongs to another account." });
+      return;
+    }
+    rooms.record(room.id, "workspace.claimed", session.user.displayName);
+    res.json({ ok: true });
+  });
+  app.use("/api/rooms/:roomId/editor-link", (_req, res, next) => {
+    if (res.locals.access !== "owner") {
+      res
+        .status(403)
+        .json({ error: "Only the workspace owner can manage editor links." });
+      return;
+    }
+    next();
+  });
+  const dropLinkEditors = (previousHash: unknown) => {
+    if (typeof previousHash === "string")
+      rooms.disconnect(
+        (auth) => auth.tokenHash === previousHash,
+        "The private editor link was replaced or revoked",
+      );
+  };
+  // Creates or replaces the private co-editor link; the token is returned only once.
+  app.post("/api/rooms/:roomId/editor-link", (_req, res) => {
+    const id = res.locals.workspace.id,
+      token = newToken(),
+      previous = rooms.db
+        .prepare("SELECT editor_token_hash FROM rooms WHERE id=?")
+        .get(id)?.editor_token_hash;
+    rooms.db
+      .prepare("UPDATE rooms SET editor_token_hash=? WHERE id=?")
+      .run(hashEditorToken(token), id);
+    dropLinkEditors(previous);
+    rooms.record(id, previous ? "link.replaced" : "link.created", "Editor link");
+    res.status(201).json({ token });
+  });
+  app.delete("/api/rooms/:roomId/editor-link", (_req, res) => {
+    const id = res.locals.workspace.id,
+      previous = rooms.db
+        .prepare("SELECT editor_token_hash FROM rooms WHERE id=?")
+        .get(id)?.editor_token_hash;
+    rooms.db
+      .prepare("UPDATE rooms SET editor_token_hash=NULL WHERE id=?")
+      .run(id);
+    dropLinkEditors(previous);
+    if (previous) rooms.record(id, "link.revoked", "Editor link");
+    res.json({ ok: true });
+  });
+  // Renaming or deleting the workspace itself is a management action.
+  const requireManager: express.RequestHandler = (_req, res, next) => {
+    if (res.locals.canEdit && !res.locals.canManage) {
+      res.status(403).json({
+        error: "Only the workspace owner can rename or delete this workspace.",
+      });
+      return;
+    }
+    next();
+  };
+  app.patch("/api/rooms/:roomId", requireManager, (req, res) => {
     const name = req.body.name;
     if (typeof name !== "string" || !name.trim() || name.length > 80)
       throw new Error("Workspace names must be 1–80 characters.");
@@ -272,7 +420,7 @@ export function createApp(
       }
     res.json({ ok: true });
   });
-  app.delete("/api/rooms/:roomId", (_req, res) => {
+  app.delete("/api/rooms/:roomId", requireManager, (_req, res) => {
     const id = res.locals.workspace.id;
     for (const session of [...rooms.active.values()])
       if (session.workspaceId === id) {
@@ -438,6 +586,19 @@ export function createApp(
     res.locals.room = room;
     next();
   });
+  app.post("/api/rooms/:roomId/migrate-snippets", (_req, res) => {
+    const result = migrateSnippets(res.locals.room);
+    if (result.migrated) {
+      rooms.save(res.locals.room);
+      rooms.record(
+        res.locals.room.workspaceId,
+        "blocks.migrated",
+        `${result.migrated} snippets`,
+      );
+      rooms.syncCatalog(res.locals.room.workspaceId);
+    }
+    res.json(result);
+  });
   app.post("/api/rooms/:roomId/documents", (req, res) => {
     if (
       Number(
@@ -449,10 +610,15 @@ export function createApp(
       throw new Error(
         "A course supports up to 2,048 files. Start another workspace for additional courses.",
       );
+    const content = req.body.content ?? "";
+    if (typeof content !== "string" || Buffer.byteLength(content) > 64 * 1024)
+      throw new Error("Initial file content must be text up to 64 KB.");
+    if (content) validateBlockCapacity(res.locals.room, content);
     const id = addDocument(
       res.locals.room,
       filename(req.body.filename),
       language(req.body.language),
+      content,
     );
     rooms.save(res.locals.room);
     rooms.record(
@@ -626,14 +792,19 @@ export function createApp(
     },
   );
   const server = createServer(app),
-    wss = setupWebsocket(server, rooms, origins);
-  const gc = setInterval(() => rooms.collect(), 15_000);
+    wss = setupWebsocket(server, rooms, origins, accounts);
+  let sweeps = 0;
+  const gc = setInterval(() => {
+    rooms.collect();
+    if (++sweeps % 240 === 0) accounts.purgeExpired();
+  }, 15_000);
   gc.unref();
   let closed = false;
   return {
     app,
     server,
     rooms,
+    accounts,
     close: async () => {
       if (closed) return;
       closed = true;

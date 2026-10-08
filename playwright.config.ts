@@ -18,6 +18,8 @@ export default defineConfig({
         env: {
           DB_PATH: "data/e2e.sqlite",
           ALLOWED_ORIGINS: "http://localhost:3000",
+          AUTH_SIGNUP_PER_HOUR: "500",
+          AUTH_SIGNIN_PER_15MIN: "500",
         },
         timeout: 30_000,
       },

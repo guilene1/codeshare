@@ -1,6 +1,6 @@
 # Production deployment (AWS Lightsail)
 
-DevShare v1 runs at **https://devshare.gamela.shop** on one small server:
+Kodelumi v1 runs at **https://devshare.gamela.shop** on one small server:
 
 | Component | Production setting |
 |---|---|
@@ -165,7 +165,7 @@ Return to the branch with `git checkout main` once a fixed release is ready.
 
 | Item | Setting |
 |---|---|
-| Snapshot | The repository's `scripts/snapshot.mjs`, run inside the running application container. It uses SQLite's online backup API (includes committed WAL pages); the live database file is never copied, and DevShare is never stopped or restarted |
+| Snapshot | The repository's `scripts/snapshot.mjs`, run inside the running application container. It uses SQLite's online backup API (includes committed WAL pages); the live database file is never copied, and Kodelumi is never stopped or restarted |
 | Checks before upload | SQLite file header, `gzip -t`, SHA-256 recorded |
 | Destination | `s3://devshare-backups-885684264653/daily/YYYY/MM/DD/devshare-YYYYMMDD-HHMMSS.sqlite.gz` (UTC); the object's metadata holds `sha256` and `raw-bytes` |
 | Bucket | us-east-1; Block Public Access fully on; ACLs disabled (bucket owner enforced); SSE-S3 (AES256) default encryption; versioning on; bucket policy denies non-TLS requests |
@@ -183,7 +183,7 @@ Return to the branch with `git checkout main` once a fixed release is ready.
 
 The server cannot list, read or delete backups or touch any other AWS resource; a leaked key could only add objects under `daily/`. Downloads and restores therefore use an operator identity on a workstation. Never put AWS credentials in Git, `.env`, Docker images or source code.
 
-**Failure behaviour.** A failed run logs `FAILURE` and exits. It never restarts DevShare, never modifies the database or volume, and never deletes earlier backups (new timestamped keys only). A lock prevents overlapping runs and each step has a timeout. There is no alerting: check the log periodically (section 6).
+**Failure behaviour.** A failed run logs `FAILURE` and exits. It never restarts Kodelumi, never modifies the database or volume, and never deletes earlier backups (new timestamped keys only). A lock prevents overlapping runs and each step has a timeout. There is no alerting: check the log periodically (section 6).
 
 **Rotate the backup access key periodically** (at least yearly, and immediately if the server may be compromised), from an operator workstation:
 
@@ -249,6 +249,48 @@ Open a known workspace to confirm its content. The replaced database stays in `/
 
 **If the server is lost:** create a new `micro_3_0` Ubuntu 24.04 instance in us-east-1, reattach the static IP `codeshare-static-ip` (DNS then needs no change), apply the firewall from section 1, follow section 2, load images built off-server (section 3), restore the database as above, and re-create the backup script, credentials and timer (section 4 and appendix; create a fresh access key).
 
+## 5a. Accounts (v2) operations
+
+v2 adds user accounts. Its SQLite changes are **additive**: new `users`, `sessions` and `password_resets` tables and a nullable `rooms.owner_id`. Existing workspaces, files, folders, snippets and editor-link hashes are not modified, and **no workspace is assigned to anyone automatically**.
+
+- **Before the first v2 deploy**, run and verify a backup (section 4). The update workflow in section 3 already does this.
+- **Existing workspaces** stay readable through their Student Links and editable through their existing editor links. A signed-in user claims one by opening it with its editor link and choosing **Add to my account**, or by importing the v1 shortcuts saved in their browser from **My Workspaces**. Each workspace can be claimed only once.
+- **Legacy snippets** are not migrated on deploy. In each affected lesson, an editor chooses **Move snippets into a lesson document**; the originals stay in the database.
+- **Ownership disputes**: `sudo docker compose exec -T application node scripts/assign-owner.mjs WORKSPACE_ID owner@example.com` (or `--unowned` to make it claimable again).
+- **Password resets** (no email delivery yet): `sudo docker compose exec -T application node scripts/issue-password-reset.mjs user@example.com https://devshare.gamela.shop` prints a single-use link valid for 30 minutes. Send it to the user over a trusted channel; it signs out all of that user's sessions when used.
+- **Cookies** are `Secure` in production (`NODE_ENV=production`), which requires HTTPS; this is already the case behind Caddy. Auth rate limits can be tuned with `AUTH_SIGNUP_PER_HOUR`, `AUTH_SIGNIN_PER_15MIN` and `AUTH_FAILURES_PER_EMAIL` (defaults 10, 20, 10).
+- **Rolling back to v1** keeps all data (v1 ignores the new tables and column) but workspaces created in v2 have no editor link; issue one with `scripts/recover-editor.mjs` if v1 must edit them. Migrated `code-blocks.md` files appear as ordinary files in v1.
+
+## 5b. Planned domain migration: kodelumi.com
+
+The application is domain-agnostic: the browser uses relative URLs, WebSockets follow the page's own origin, and Compose derives `ALLOWED_ORIGINS` and the Caddy site from `DOMAIN`. `devshare.gamela.shop` keeps working until you switch. **Nothing below has been done yet.**
+
+**What changes for users on the new origin.** Browsers isolate storage per domain, so on `kodelumi.com`:
+
+- Everyone signs in once more. Accounts and passwords are unchanged, but the `__Host-` session cookie is per-host.
+- Per-browser preferences (theme, editor settings, open tabs) start fresh.
+- v1 editor shortcuts saved in a browser can only be imported from the domain they were saved on. Ask instructors to use **My Workspaces → Add to my account** on `devshare.gamela.shop` before the old domain becomes a redirect, or keep it serving normally for a transition period.
+
+Workspaces, lessons, student links (`/w/ID`), co-editor links and backups are unaffected.
+
+**Steps (during a quiet period, after a verified backup):**
+
+1. **DNS** (where `kodelumi.com` is managed): create `A kodelumi.com → 52.206.92.51` and `A www.kodelumi.com → 52.206.92.51`, TTL 300. Do not add AAAA records. Check propagation with `dig +short kodelumi.com @1.1.1.1`.
+2. **Caddyfile**: keep the existing `{$DOMAIN} { … }` site block, which will serve `kodelumi.com` after step 3, and append a redirect for the other names. The redirect preserves paths, so old Student Links keep working:
+
+   ```caddyfile
+   www.kodelumi.com, devshare.gamela.shop {
+     redir https://kodelumi.com{uri} permanent
+   }
+   ```
+
+3. **Server `.env`**: `DOMAIN=kodelumi.com` (keep `ACME_EMAIL`). Compose then sets `ALLOWED_ORIGINS=https://kodelumi.com` automatically.
+4. **Apply**: `git pull --ff-only`, then `sudo docker compose up -d --no-build` (recreates Caddy and the application with the new origin; volumes are untouched). Caddy obtains certificates for all three names; ports 80/443 must stay open.
+5. **Verify**: `curl -I https://kodelumi.com` (200), `curl -I https://devshare.gamela.shop/w/ANY_ID` (301 to `https://kodelumi.com/w/ANY_ID`), `https://kodelumi.com/api/health`, sign in, open a Student Link in a private window and confirm live updates over WSS.
+6. **Operations**: use `https://kodelumi.com` as the origin argument for `scripts/issue-password-reset.mjs` and `scripts/recover-editor.mjs`, update bookmarks and documentation links, and keep the `devshare.gamela.shop` Route 53 record while the redirect is in use.
+
+**Rollback**: set `DOMAIN=devshare.gamela.shop`, remove the redirect block, and run `sudo docker compose up -d --no-build`.
+
 ## 6. Operations
 
 Run from `/opt/devshare` on the server.
@@ -293,11 +335,11 @@ Routine notes:
 
 ```bash
 #!/usr/bin/env bash
-# DevShare daily SQLite backup -> private S3 bucket.
+# Kodelumi daily SQLite backup -> private S3 bucket.
 # Installed at /opt/devshare-backup/devshare-backup.sh (root-owned, not in Git).
 # Uses the repository's scripts/snapshot.mjs (SQLite online backup API) inside the
 # running application container, so the live database is never copied directly and
-# DevShare is never stopped or restarted. Uploads only the compressed database.
+# Kodelumi is never stopped or restarted. Uploads only the compressed database.
 set -Eeuo pipefail
 umask 077
 
@@ -356,7 +398,7 @@ log "SUCCESS: s3://$BUCKET/$key raw=${raw_size}B gz=${gz_size}B sha256=$sha"
 
 ```ini
 [Unit]
-Description=DevShare SQLite backup to S3
+Description=Kodelumi SQLite backup to S3
 Wants=network-online.target
 After=network-online.target docker.service
 
@@ -371,7 +413,7 @@ IOSchedulingClass=idle
 
 ```ini
 [Unit]
-Description=Daily DevShare SQLite backup at 03:00 UTC
+Description=Daily Kodelumi SQLite backup at 03:00 UTC
 
 [Timer]
 OnCalendar=*-*-* 03:00:00 UTC

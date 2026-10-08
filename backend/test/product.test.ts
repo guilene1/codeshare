@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
 import { createApp } from "../src/app.js";
+import { createRoom } from "./helpers.js";
 
 test("templates, private metadata summaries and meaningful history persist without hydrating courses", async () => {
   const dir = await mkdtemp(join(tmpdir(), "devshare-product-")),
@@ -22,7 +23,9 @@ test("templates, private metadata summaries and meaningful history persist witho
     body?: unknown,
     editor = true,
   ) =>
-    fetch(`http://127.0.0.1:${port}/api${url}`, {
+    url === "/rooms" && method === "POST"
+      ? createRoom(app, `http://127.0.0.1:${port}`, body as Record<string, unknown>)
+      : fetch(`http://127.0.0.1:${port}/api${url}`, {
       method,
       headers: {
         "Content-Type": "application/json",
@@ -57,7 +60,7 @@ test("templates, private metadata summaries and meaningful history persist witho
       assert.equal(app.rooms.active.size, 0);
       assert.equal(
         (await request(base + "/summary", "GET", undefined, false)).status,
-        403,
+        404,
       );
       assert.ok(!JSON.stringify(meta).includes(token));
       assert.ok(!("editor_token_hash" in meta));

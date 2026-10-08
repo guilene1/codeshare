@@ -21,6 +21,8 @@ RUN npm ci --omit=dev --workspace backend --include-workspace-root=false && npm 
 COPY --from=build /app/backend/dist backend/dist
 COPY scripts/snapshot.mjs scripts/snapshot.mjs
 COPY scripts/recover-editor.mjs scripts/recover-editor.mjs
+COPY scripts/issue-password-reset.mjs scripts/issue-password-reset.mjs
+COPY scripts/assign-owner.mjs scripts/assign-owner.mjs
 USER node
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD node -e "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"

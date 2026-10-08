@@ -8,6 +8,7 @@ import * as Y from "yjs";
 import { WebSocket } from "ws";
 import { WebsocketProvider } from "y-websocket";
 import { createApp } from "../src/app.js";
+import { createRoom } from "./helpers.js";
 
 async function until(check: () => boolean, timeout = 5000) {
   const start = Date.now();
@@ -34,7 +35,14 @@ test("real clients converge, presence clears, metadata syncs, reconnect and SQLi
     base = `http://127.0.0.1:${port}`;
   const clients: WebsocketProvider[] = [];
   const request = async (path: string, method = "GET", body?: unknown) =>
-    fetch(base + "/api" + path, {
+    path === "/rooms" && method === "POST"
+      ? createRoom(
+          app,
+          base,
+          { ...(body as Record<string, unknown>), editorTokenHash },
+          origin,
+        )
+      : fetch(base + "/api" + path, {
       method,
       headers: {
         "content-type": "application/json",
@@ -191,7 +199,15 @@ test("validation, request limits, origin checks, malicious metadata rejection an
   const port = (app.server.address() as { port: number }).port,
     base = `http://127.0.0.1:${port}`;
   const request = (path: string, body: unknown, source = origin) =>
-    fetch(base + "/api" + path, {
+    path === "/rooms"
+      ? createRoom(
+          app,
+          base,
+          { ...(body as Record<string, unknown>), editorTokenHash },
+          source,
+          origin,
+        )
+      : fetch(base + "/api" + path, {
       method: "POST",
       headers: {
         "content-type": "application/json",

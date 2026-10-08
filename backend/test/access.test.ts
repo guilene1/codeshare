@@ -8,6 +8,7 @@ import * as Y from "yjs";
 import { WebSocket } from "ws";
 import { WebsocketProvider } from "y-websocket";
 import { createApp } from "../src/app.js";
+import { createRoom } from "./helpers.js";
 import { DatabaseSync } from "node:sqlite";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -44,7 +45,9 @@ test("server enforces editor capability across REST, Yjs writes, spoofed roles, 
     body?: unknown,
     credential?: string,
   ) =>
-    fetch(base + "/api" + path, {
+    path === "/rooms" && method === "POST"
+      ? createRoom(app, base, body as Record<string, unknown>, origin)
+      : fetch(base + "/api" + path, {
       method,
       headers: {
         origin,

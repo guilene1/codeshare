@@ -1,6 +1,8 @@
-# DevShare — Live DevOps Classroom
+# Kodelumi — Real-time coding, documentation and collaboration
 
-One instructor, live read-only students, permanent course history and individually copyable teaching snippets. React/Monaco/Yjs, one Node application, SQLite and Caddy. Code is shared, never executed.
+**Code • Learn • Create • Share.** Kodelumi was previously named DevShare. Internal identifiers keep the original `devshare` name on purpose: localStorage keys (`devshare.*`), the session cookie (`__Host-devshare_sid`), the WebSocket subprotocol, the SQLite file, Docker volumes and Compose project, the server paths (`/opt/devshare`, `/opt/devshare-backup`) and the S3 bucket. Renaming any of them would sign users out, drop their saved tabs and settings, or detach existing data. Brand assets (logo mark, horizontal logos for dark and light backgrounds, favicon, app icons and web manifest) are in `frontend/public`; the in-app logo is `frontend/src/brand.tsx`.
+
+Instructor accounts that own their workspaces, live read-only student links that need no account, permanent course history and Markdown lessons with individually copyable inline code blocks. React/Monaco/Yjs, one Node application, SQLite and Caddy. Code is shared, never executed.
 
 The [final requirements](REQUIREMENTS.md) supersede older specifications. See the complete [Lightsail deployment/backup guide](docs/DEPLOYMENT.md) and [configurable viewer measurement guide](docs/LOAD_TEST.md).
 
@@ -29,26 +31,33 @@ Open http://localhost:8080. The override binds only to localhost and sets local 
 
 ## Test instructor/student access
 
-1. Click **Create Workspace**, enter your name, course title and optional description, then choose Empty, Terraform, Kubernetes, Python or General DevOps. Templates create a few sensible starter files. The browser generates a cryptographic 32-byte token and sends only its SHA-256 hash when creating the workspace. Save the private editor link securely.
-2. Creators see **Editing**. **Share → Copy Student Link** grants view-only access; **Copy Editor Link** grants editing and must remain private. Public `/w/ID` is always view-only. Private `/w/ID/edit/TOKEN` requires server validation. A selected lesson uses `?folder=FOLDER_ID` on either link.
-3. Create folders such as **Week 04 - Terraform**. Open a folder and create files. Folder menus provide subfolders, rename, reorder and confirmed subtree deletion. File toolbar arrows reorder files.
-4. Open the student link in an incognito browser. It opens immediately, with no name or onboarding prompt. Verify **View Only / Live**, folder/file navigation, selection/copy, search, personal theme/font and live instructor updates. Editing/paste and management controls must be hidden. Anonymous students contribute only to the viewer count; they never appear as named collaborators.
-5. Choose **Code Blocks → + Add Code Block**. Each independent object has an optional title, language, content and its own **Copy → ✓ Copied** button. Copy includes only that block’s exact content; feedback lasts two seconds. Untitled one-line snippets use compact command rows. Instructors edit/delete/reorder blocks; students select/copy them.
-6. Refresh and restart the application container, then reopen the same lesson. Content, language, order and directory must remain. Settings allows instructor-only workspace rename and permanent deletion after typing its name.
+1. **Sign Up** with a display name, email and password (at least 10 characters; common or personal words are rejected), or **Sign In**. Accounts are required to create workspaces; every workspace has exactly one owner.
+2. **Create Workspace**: enter a course title and optional description, then choose Empty, Terraform, Kubernetes, Python or General DevOps. The owner opens it at `/w/ID` and sees **Editing** through the session; no credential appears in the URL.
+3. **Share → Copy Student Link** gives anyone view-only access at the same `/w/ID` (plus `?folder=FOLDER_ID` for a lesson). Students need no account and see no name or sign-in prompt. Signed-in users who do not own the workspace are viewers too.
+4. To let a co-teacher edit without transferring ownership, the owner chooses **Share → Create co-editor link**. The link (`/w/ID/edit/TOKEN`) is shown once; **Replace link** or **Revoke link** invalidates it immediately, including open connections. Co-editors can edit content and manage files and folders, but only the owner can rename, delete or manage links.
+5. Create folders such as **Week 04 - Terraform**, open one and create files. Folder menus provide subfolders, rename, reorder and confirmed subtree deletion.
+6. Open the student link in an incognito browser. Verify **View Only / Live**, Explorer navigation, selection/copy, search, personal theme/font and live instructor updates. Editing, paste and management controls are hidden, and the server rejects viewer writes over REST and WebSocket.
+7. Refresh and restart the application container, then reopen the same lesson; content, order and folders remain.
 
-## Returning instructors and teaching notes
+## My Workspaces, lessons and tabs
 
-**My Workspaces** remembers workspaces created or opened with server-validated editor access. Home shows up to six recent shortcuts; `/workspaces` shows all remembered shortcuts, search, recent/name sorting, server file/snippet counts and compact recent activity. Use each card's menu to rename the shared workspace, copy either link or remove the local shortcut. **Remove from My Workspaces does not delete server content.** Permanent deletion is a separate confirmed action inside workspace settings.
+**My Workspaces** lists the signed-in account's own workspaces on any device: search, recent/name sorting, file and folder counts and recent activity. Card menus rename, copy the Student Link or permanently delete (after typing the workspace name). Dashboard responses never include editor credentials. **Account** changes the display name, email (with the current password) and password; a password change signs out other devices, and **Sign out other devices** is available separately.
 
-The obvious **← My Workspaces** control checkpoints the active lesson before returning. Opening a card restores its remembered folder, file and Files & Editor/Code Blocks view. Counts, descriptions and meaningful structure/snippet activity come from lightweight SQLite summaries; dashboard requests never hydrate lesson Yjs documents. Activity is persisted without recording keystrokes.
+Sessions use an `HttpOnly`, `SameSite=Lax` cookie (`Secure` with the `__Host-` prefix in production) that expires after 14 idle days or 30 days in total; the server stores only its SHA-256 hash. Cookie-authenticated writes also require an allowed `Origin` and a per-session CSRF header. Passwords are hashed with Argon2id (`@node-rs/argon2`, 19 MiB, 2 passes). Sign-in, sign-up and password endpoints are rate-limited, and repeated failures lock an email for 15 minutes. No password, session or editor token is stored in localStorage.
 
-Shortcuts and private editor tokens live in `devshare.workspaces.v1` in this browser's localStorage. This is intentionally **browser/device-specific**, with no account system. Student links never read or inherit those editor credentials. Clearing browser storage removes shortcuts and locally saved capabilities, but does not remove server content; keep private links separately for recovery. Use a private browser profile on shared devices. Revoked/deleted workspaces keep an explanatory unavailable shortcut until you remove it or open a valid editor link. Existing workspaces are remembered after you reopen their private editor link once; the server does not publicly list private courses.
+**Lessons with inline code blocks.** Code blocks belong inside Markdown lesson documents, between headings, paragraphs and lists, each with its language label, syntax highlighting and its own **Copy** button. Markdown files open in **Edit / Split / Preview** for editors (Split by default on wide screens) and in **Preview** for students, who can switch to read-only Source. Editors can:
 
-For Markdown files, instructors use **Edit / Preview**; students start in **Preview** and can switch to read-only **Source**. Preview supports headings, paragraphs, emphasis, inline code, lists, quotes, links and highlighted fenced code with individual Copy buttons. Raw HTML renders as text and unsafe link schemes are disabled. This is a small teaching renderer, not a full CommonMark/GFM implementation; tables, embedded HTML and advanced extensions are not provided.
+- **Insert code block** at the cursor (language picker), or **Add code block** at the end of the preview;
+- select text and choose **Create Code Block from Selection** (right-click): in a Markdown file the selection becomes a block in place; in a source file such as `main.tf` it is added to a lesson document in the same lesson (or a new `lesson.md`), leaving the source file unchanged;
+- **Edit**, **Move up/down** and **Delete** each block from the preview. Changes apply only if the block is unchanged since it was displayed, so a co-editor's concurrent edit is never overwritten.
 
-To save part of a file as an independent teaching snippet, select text in Monaco, right-click and choose **Create Code Block from Selection**. The dialog contains the exact selection and current file language. Add a title if useful, then **Create Block**. It appears in that lesson's Code Blocks view with its own Copy button. Students never receive this creation action. The existing **+ Add Code Block** workflow remains available.
+Blocks are standard fenced code blocks in the shared document, so they collaborate live, persist like any text and survive download. Source files (`.tf`, `.py`, `.yaml`, `.js`…) stay plain source. Rendering builds React elements only: raw HTML is shown as text and unsafe link schemes are disabled. This is a small teaching renderer, not full CommonMark/GFM.
 
-All 15 languages are supported: Terraform/HCL, Python, Bash/Shell, YAML, JSON, JavaScript, TypeScript, Java, Go, Dockerfile, SQL, Markdown, HTML, CSS and plain text. Monaco provides syntax highlighting, line numbers, bracket matching, search/replace (instructor only), word wrap, minimap, font controls and shortcuts. HCL uses a custom tokenizer, not a Terraform language server.
+**Legacy snippets.** v1's separate Code Blocks panel is retired. Lessons that still contain v1 snippets show a read-only **Legacy snippets** view; an editor can choose **Move snippets into a lesson document**, which appends them, in order and with their titles, to a new `code-blocks.md`. Nothing migrates automatically, and the original snippet data is kept (hidden) so a rollback loses nothing.
+
+**Tabs** work like an editor: clicking a file in the Explorer opens or focuses its tab; the **×** on a tab, middle-click or **Alt+W** closes it (Ctrl+W belongs to the browser). Closing a tab never changes or deletes the shared file, and edits are already live, so nothing is lost. Each browser remembers its open tabs per lesson; viewers manage their own tabs too.
+
+All 15 languages are supported: Terraform/HCL, Python, Bash/Shell, YAML, JSON, JavaScript, TypeScript, Java, Go, Dockerfile, SQL, Markdown, HTML, CSS and plain text. HCL uses a custom tokenizer, not a Terraform language server.
 
 ## Persistence and memory
 
@@ -60,7 +69,7 @@ SQLite WAL checkpoints coalesce on a 1.5-second window rather than rewriting doc
 
 Investigate and upgrade Lightsail when representative classes cause sustained host RAM above 80–85%, growing swap usage, Node RSS approaching its 512 MiB container limit, OOM restarts, sustained high CPU with rising delivery latency, repeated disconnects/5xx errors or failing checkpoints. Repeated P95 full fan-out above 500 ms on a healthy nearby network warrants investigation. Monitor disk growth because course history is permanent. Run the load generator from another machine so its own RAM/CPU does not distort the 1 GB host measurements.
 
-Public IDs contain 96 random bits; private tokens contain 256 random bits. Only hashes are stored in SQLite. REST validates Bearer credentials and WebSockets validate the request subprotocol credential, returning only fixed `devshare` in the handshake. Every Yjs write rechecks authorization, including after rotation. The server supplies roles, rejects all viewer writes and validates candidate updates. Directory/file/block metadata mutations use authenticated REST. Tokens never enter shared Yjs state, viewer responses or bundles. Caddy omits request details from runtime/error logs; access logging is disabled.
+Public IDs contain 96 random bits; session, reset and editor tokens contain 256 random bits. Only hashes are stored in SQLite. Owners are recognised from the session cookie; REST validates Bearer credentials and WebSockets validate the request subprotocol credential, returning only fixed `devshare` in the handshake. Every Yjs write rechecks authorization (ownership with a live session, or a valid editor link), so sign-out, password changes and link rotation take effect immediately. The server supplies roles, rejects all viewer writes and validates candidate updates. Directory/file/block metadata mutations use authenticated REST. Tokens never enter shared Yjs state, viewer responses or bundles. Caddy omits request details from runtime/error logs; access logging is disabled.
 
 ## Checks and load test
 
@@ -72,7 +81,7 @@ npx playwright install chromium
 npm run test:e2e
 ```
 
-Backend tests use temporary databases and real WebSockets for authorization, spoofed roles, rejected writes, folder isolation, idle eviction, migration, ordering, restart persistence and consistent backups. Browser tests exercise real Monaco, Terraform/Python/YAML highlighting, nested folders, student views, snippets/copying, sharing and responsive themes.
+Backend tests use temporary databases and real WebSockets for registration, Argon2id hashing, sessions and expiry, CSRF/Origin enforcement, rate limits, password change/reset, ownership and cross-user denial, claiming, editor-link revocation, snippet migration, authorization, spoofed roles, rejected writes, folder isolation, idle eviction, migration, ordering, restart persistence and consistent backups. Browser tests exercise sign-up/sign-in/sign-out, account isolation, claiming and v1 shortcut import, real Monaco, nested folders, inline lesson blocks (insert, from selection, edit, move, delete, copy), closable tabs, student views, sharing and responsive themes.
 
 Against the running Docker preview:
 
@@ -82,7 +91,7 @@ node scripts/verify-docker.mjs
 METRICS_TOKEN=local-preview-metrics-only npm run test:load -- --url=http://localhost:8080 --viewers=50 --updates=100 --document-kib=64 --output=load-test-report.json
 ```
 
-PowerShell: set `$env:DEVSHARE_BASE_URL='http://localhost:8080'` or `$env:METRICS_TOKEN='local-preview-metrics-only'` before its command. The load script creates/removes only its synthetic workspace. It verifies real broadcasts, reconnects, authorization, cleanup and idle persistence. Follow [measurement instructions](docs/LOAD_TEST.md) for CPU/RAM and upgrade criteria. A local pass is not a Lightsail benchmark: repeat against production from a separate machine. Test-managed browser runs use `data/e2e.sqlite`; browser-created fixtures remain until manually deleted.
+PowerShell: set `$env:DEVSHARE_BASE_URL='http://localhost:8080'` or `$env:METRICS_TOKEN='local-preview-metrics-only'` before its command. The load script signs up a throwaway account (or uses `DEVSHARE_EMAIL`/`DEVSHARE_PASSWORD` for an existing one) and creates/removes only its synthetic workspace. It verifies real broadcasts, reconnects, authorization, cleanup and idle persistence. Follow [measurement instructions](docs/LOAD_TEST.md) for CPU/RAM and upgrade criteria. A local pass is not a Lightsail benchmark: repeat against production from a separate machine. Test-managed browser runs use `data/e2e.sqlite`; browser-created fixtures remain until manually deleted.
 
 ## Environment
 
@@ -97,7 +106,10 @@ PowerShell: set `$env:DEVSHARE_BASE_URL='http://localhost:8080'` or `$env:METRIC
 | `NODE_OPTIONS` | Compose sets `--max-old-space-size=384`; app container limited to 512 MiB |
 | `S3_BACKUP_BUCKET`, `S3_BACKUP_PREFIX`, `AWS_REGION` | Optional host backup configuration; app never requires S3 |
 | `AWS_PROFILE` / AWS CLI credentials | Host authentication only, never committed or embedded in images |
+| `COOKIE_SECURE` | Defaults to secure cookies when `NODE_ENV=production`; the local HTTP preview sets `0` |
+| `AUTH_SIGNUP_PER_HOUR`, `AUTH_SIGNIN_PER_15MIN`, `AUTH_FAILURES_PER_EMAIL` | Optional rate-limit overrides (defaults 10, 20, 10); the local preview raises them for browser tests |
 | `DEVSHARE_BASE_URL` | Browser-test target; omit for test-managed local backend |
+| `DEVSHARE_EMAIL`, `DEVSHARE_PASSWORD` | Optional existing account for the load test |
 
 Old retention variables are ignored. Preserve existing volumes during upgrades; migrations add folders, positions and nullable folder associations without removing root files or snippets.
 
@@ -115,7 +127,22 @@ Local preview:
 docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.local.yml -p devshare-local exec -T application node scripts/recover-editor.mjs WORKSPACE_ID http://localhost:8080
 ```
 
-Append `--rotate` to revoke an existing private link. Operator output is deliberate one-time credential delivery; do not redirect it into logs or share it with students. No public ownership-claim endpoint exists.
+Append `--rotate` to revoke an existing private link. Operator output is deliberate one-time credential delivery; do not redirect it into logs or share it with students.
+
+**Claiming v1 workspaces.** Existing workspaces have no owner. A signed-in user who opens one with its private editor link sees **Add to my account**; the claim succeeds only once, atomically. Users can also import the v1 shortcuts remembered in their browser from **My Workspaces**; each is claimed with its stored link and then deleted from localStorage. Editor links keep working after a claim. Resolve disputes with:
+
+```sh
+docker compose exec -T application node scripts/assign-owner.mjs WORKSPACE_ID owner@example.com
+docker compose exec -T application node scripts/assign-owner.mjs WORKSPACE_ID --unowned
+```
+
+**Password resets.** Kodelumi does not send email yet, so **Forgot password?** asks users to contact the administrator, who issues a single-use link valid for 30 minutes:
+
+```sh
+docker compose exec -T application node scripts/issue-password-reset.mjs user@example.com https://code.example.com
+```
+
+The token is in the URL fragment, so it never reaches server or proxy logs; only its hash is stored. Using it signs out every session of that account. Send it to the user over a trusted channel.
 
 ## Project structure
 

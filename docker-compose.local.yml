@@ -5,6 +5,11 @@ services:
     environment:
       ALLOWED_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
       METRICS_TOKEN: local-preview-metrics-only
+      # Plain-HTTP preview: the session cookie cannot be Secure here.
+      COOKIE_SECURE: "0"
+      # Browser tests create many accounts from one address.
+      AUTH_SIGNUP_PER_HOUR: "500"
+      AUTH_SIGNIN_PER_15MIN: "500"
   caddy:
     ports: !override
       - "127.0.0.1:8080:80"

@@ -5,6 +5,8 @@ import {
   Copy,
   FileCode2,
   FolderOpen,
+  History,
+  Loader2,
   MoreHorizontal,
   Pencil,
   Plus,
@@ -12,75 +14,49 @@ import {
   Trash2,
 } from "lucide-react";
 import Modal from "./Modal";
-import { api } from "../lib";
+import { api, readLocal } from "../lib";
 import {
   activityText,
-  editorPath,
-  forget,
+  forgetLegacy,
+  legacyShortcuts,
   relativeTime,
-  remember,
-  shortcuts,
-  summary,
-  type Shortcut,
-  type WorkspaceSummary,
+  type OwnedWorkspace,
 } from "../workspaces";
 
 export default function WorkspaceDashboard({
-  compact = false,
   navigate,
   onCreate,
   notify,
 }: {
-  compact?: boolean;
   navigate: (path: string) => void;
   onCreate: () => void;
   notify: (message: string) => void;
 }) {
-  const [items, setItems] = useState(shortcuts);
-  const [details, setDetails] = useState<Record<string, WorkspaceSummary>>({});
-  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [items, setItems] = useState<OwnedWorkspace[] | null>(null);
+  const [loadError, setLoadError] = useState("");
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState("recent");
   const [menu, setMenu] = useState<string | null>(null);
-  const [target, setTarget] = useState<Shortcut | null>(null);
-  const [mode, setMode] = useState<"rename" | "remove">("rename");
+  const [target, setTarget] = useState<OwnedWorkspace | null>(null);
+  const [mode, setMode] = useState<"rename" | "delete">("rename");
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  useEffect(() => {
-    let canceled = false;
-    async function load() {
-      // Metadata only, with bounded concurrency; no lesson Yjs documents are loaded.
-      const visible = compact ? items.slice(0, 6) : items;
-      for (let index = 0; index < visible.length && !canceled; index += 4) {
-        await Promise.all(
-          visible.slice(index, index + 4).map(async (item) => {
-            try {
-              const value = await summary(item);
-              if (!canceled) {
-                setDetails((previous) => ({ ...previous, [item.id]: value }));
-                setErrors((previous) => {
-                  const next = { ...previous };
-                  delete next[item.id];
-                  return next;
-                });
-              }
-            } catch (e) {
-              if (!canceled)
-                setErrors((previous) => ({
-                  ...previous,
-                  [item.id]: (e as Error).message,
-                }));
-            }
-          }),
-        );
-      }
+  const [legacy, setLegacy] = useState(legacyShortcuts);
+  const [importing, setImporting] = useState(false);
+  const [importNotes, setImportNotes] = useState<string[]>([]);
+  async function load() {
+    try {
+      const result = await api<{ workspaces: OwnedWorkspace[] }>("/me/workspaces");
+      setItems(result.workspaces);
+      setLoadError("");
+    } catch (e) {
+      setLoadError((e as Error).message);
     }
+  }
+  useEffect(() => {
     void load();
-    return () => {
-      canceled = true;
-    };
-  }, [compact, items]);
+  }, []);
   useEffect(() => {
     if (!menu) return;
     const outside = (event: MouseEvent) => {
@@ -100,98 +76,125 @@ export default function WorkspaceDashboard({
       document.removeEventListener("keydown", escape);
     };
   }, [menu]);
-  const shown = items
+  // One-time import: claims each v1 browser shortcut with its editor link, then
+  // deletes the stored token from this browser.
+  async function importLegacy() {
+    setImporting(true);
+    const notes: string[] = [];
+    for (const item of legacyShortcuts()) {
+      try {
+        await api(`/rooms/${item.id}/claim`, "POST", {}, item.token);
+        forgetLegacy(item.id);
+      } catch (e) {
+        const status = (e as { status?: number }).status;
+        if (status === 404 || status === 403 || status === 409) {
+          forgetLegacy(item.id);
+          notes.push(
+            `“${item.name}” was not imported: ${(e as Error).message}`,
+          );
+        } else notes.push(`“${item.name}”: ${(e as Error).message}`);
+      }
+    }
+    setLegacy(legacyShortcuts());
+    setImportNotes(notes);
+    setImporting(false);
+    await load();
+    notify(notes.length ? "Import finished with notes" : "Workspaces added to your account");
+  }
+  const shown = (items ?? [])
     .filter((item) =>
-      `${details[item.id]?.name ?? item.name} ${details[item.id]?.description ?? item.description ?? ""}`
+      `${item.name} ${item.description}`
         .toLowerCase()
         .includes(query.toLowerCase()),
     )
     .sort((a, b) =>
-      sort === "name"
-        ? (details[a.id]?.name ?? a.name).localeCompare(
-            details[b.id]?.name ?? b.name,
-          )
-        : Math.max(details[b.id]?.updated_at ?? 0, b.lastOpened) -
-          Math.max(details[a.id]?.updated_at ?? 0, a.lastOpened),
+      sort === "name" ? a.name.localeCompare(b.name) : b.updated_at - a.updated_at,
     );
-  const activity = items
-    .flatMap((item) =>
-      (details[item.id]?.activity ?? []).map((event) => ({ event, item })),
-    )
+  const activity = (items ?? [])
+    .flatMap((item) => item.activity.map((event) => ({ event, item })))
     .sort((a, b) => b.event.created_at - a.event.created_at)
-    .slice(0, compact ? 3 : 8);
-  async function copy(item: Shortcut, privateLink: boolean) {
+    .slice(0, 8);
+  async function copyStudentLink(item: OwnedWorkspace) {
     try {
-      await navigator.clipboard.writeText(
-        location.origin +
-          (privateLink
-            ? editorPath(item)
-            : `/w/${item.id}` + (item.folder ? `?folder=${item.folder}` : "")),
-      );
-      notify(
-        privateLink
-          ? "Editor link copied. Keep it private."
-          : "Student link copied",
-      );
+      await navigator.clipboard.writeText(location.origin + "/w/" + item.id);
+      notify("Student link copied");
     } catch {
       notify("Clipboard unavailable. Open the workspace and use Share.");
     }
     setMenu(null);
   }
-  if (compact && !items.length) return null;
   return (
-    <section
-      className={"workspace-dashboard" + (compact ? " compact-dashboard" : "")}
-      aria-label="My Workspaces"
-    >
+    <section className="workspace-dashboard" aria-label="My Workspaces">
       <div className="dashboard-heading">
         <div>
           <h2>My Workspaces</h2>
-          <p>Continue where you left off.</p>
+          <p>Your workspaces, on every device you sign in to.</p>
         </div>
-        {compact ? (
-          <button
-            className="text-button"
-            onClick={() => navigate("/workspaces")}
-          >
-            View all workspaces <ArrowRight size={15} />
-          </button>
-        ) : (
-          <button className="button primary" onClick={onCreate}>
-            <Plus size={16} /> Create Workspace
-          </button>
-        )}
+        <button className="button primary" onClick={onCreate}>
+          <Plus size={16} /> Create Workspace
+        </button>
       </div>
-      {!compact && (
-        <>
-          <p className="device-note">
-            Private shortcuts are saved only in this browser. Your course
-            content stays safely on the server.
-          </p>
-          {!!items.length && (
-            <div className="dashboard-filters">
-              <label>
-                <Search size={16} />
-                <input
-                  aria-label="Search workspaces"
-                  placeholder="Search your workspaces"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                />
-              </label>
-              <select
-                aria-label="Sort workspaces"
-                value={sort}
-                onChange={(e) => setSort(e.target.value)}
-              >
-                <option value="recent">Recently used / updated</option>
-                <option value="name">Name</option>
-              </select>
-            </div>
-          )}
-        </>
+      {!!legacy.length && (
+        <div className="import-banner" role="region" aria-label="Import workspaces">
+          <History size={18} />
+          <div>
+            <strong>
+              {legacy.length} workspace{legacy.length === 1 ? "" : "s"} saved
+              in this browser
+            </strong>
+            <p>
+              Add the workspaces you opened with private editor links in this
+              browser to your account. Their links keep working, and the saved
+              links are then removed from this browser.
+            </p>
+          </div>
+          <button
+            className="button primary"
+            onClick={() => void importLegacy()}
+            disabled={importing}
+          >
+            {importing && <Loader2 size={15} className="spin" />} Add to my
+            account
+          </button>
+        </div>
       )}
-      {!items.length ? (
+      {!!importNotes.length && (
+        <ul className="import-notes">
+          {importNotes.map((note) => (
+            <li key={note}>{note}</li>
+          ))}
+        </ul>
+      )}
+      {!!items?.length && (
+        <div className="dashboard-filters">
+          <label>
+            <Search size={16} />
+            <input
+              aria-label="Search workspaces"
+              placeholder="Search your workspaces"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          </label>
+          <select
+            aria-label="Sort workspaces"
+            value={sort}
+            onChange={(e) => setSort(e.target.value)}
+          >
+            <option value="recent">Recently updated</option>
+            <option value="name">Name</option>
+          </select>
+        </div>
+      )}
+      {loadError ? (
+        <p className="error" role="alert">
+          {loadError}
+        </p>
+      ) : !items ? (
+        <p className="dashboard-empty">
+          <Loader2 size={20} className="spin" /> Loading your workspaces…
+        </p>
+      ) : !items.length ? (
         <div className="dashboard-empty">
           <FolderOpen size={30} />
           <h3>Your workspace starts here.</h3>
@@ -204,98 +207,91 @@ export default function WorkspaceDashboard({
         <p className="dashboard-empty">No workspaces match your search.</p>
       ) : (
         <div className="workspace-grid">
-          {(compact ? shown.slice(0, 6) : shown).map((item) => {
-            const value = details[item.id];
-            return (
-              <article
-                className="workspace-card"
-                key={item.id}
-                aria-label={value?.name ?? item.name}
-              >
-                <div className="workspace-card-top">
-                  <span className="workspace-card-icon">
-                    <FolderOpen size={19} />
-                  </span>
-                  {!compact && (
-                    <div className="shortcut-menu">
+          {shown.map((item) => (
+            <article
+              className="workspace-card"
+              key={item.id}
+              aria-label={item.name}
+            >
+              <div className="workspace-card-top">
+                <span className="workspace-card-icon">
+                  <FolderOpen size={19} />
+                </span>
+                <div className="shortcut-menu">
+                  <button
+                    className="icon-button"
+                    aria-label={`Manage ${item.name}`}
+                    aria-expanded={menu === item.id}
+                    onClick={() => setMenu(menu === item.id ? null : item.id)}
+                  >
+                    <MoreHorizontal size={18} />
+                  </button>
+                  {menu === item.id && (
+                    <div role="menu">
                       <button
-                        className="icon-button"
-                        aria-label={`Manage ${value?.name ?? item.name}`}
-                        aria-expanded={menu === item.id}
-                        onClick={() =>
-                          setMenu(menu === item.id ? null : item.id)
-                        }
+                        onClick={() => {
+                          setTarget(item);
+                          setMode("rename");
+                          setDraft(item.name);
+                          setError("");
+                          setMenu(null);
+                        }}
                       >
-                        <MoreHorizontal size={18} />
+                        <Pencil size={14} /> Rename workspace
                       </button>
-                      {menu === item.id && (
-                        <div role="menu">
-                          <button
-                            onClick={() => {
-                              setTarget(item);
-                              setMode("rename");
-                              setDraft(value?.name ?? item.name);
-                              setError("");
-                              setMenu(null);
-                            }}
-                          >
-                            <Pencil size={14} /> Rename workspace
-                          </button>
-                          <button onClick={() => void copy(item, false)}>
-                            <Copy size={14} /> Copy Student Link
-                          </button>
-                          <button onClick={() => void copy(item, true)}>
-                            <Copy size={14} /> Copy Editor Link
-                          </button>
-                          <button
-                            onClick={() => {
-                              setTarget(item);
-                              setMode("remove");
-                              setMenu(null);
-                              setError("");
-                            }}
-                          >
-                            <Trash2 size={14} /> Remove from My Workspaces
-                          </button>
-                        </div>
-                      )}
+                      <button onClick={() => void copyStudentLink(item)}>
+                        <Copy size={14} /> Copy Student Link
+                      </button>
+                      <button
+                        className="danger-item"
+                        onClick={() => {
+                          setTarget(item);
+                          setMode("delete");
+                          setDraft("");
+                          setMenu(null);
+                          setError("");
+                        }}
+                      >
+                        <Trash2 size={14} /> Delete workspace
+                      </button>
                     </div>
                   )}
                 </div>
-                <h3>{value?.name ?? item.name}</h3>
-                <p className="workspace-description">
-                  {value?.description ||
-                    item.description ||
-                    "Lessons, files and reusable snippets."}
-                </p>
-                <div className="workspace-card-counts">
-                  <FileCode2 size={14} />{" "}
-                  {value
-                    ? `${value.files} file${value.files === 1 ? "" : "s"} · ${value.blocks} code block${value.blocks === 1 ? "" : "s"}`
-                    : errors[item.id]
-                      ? "Unavailable"
-                      : "Loading workspace details…"}
-                </div>
-                {errors[item.id] && (
-                  <p className="shortcut-error">
-                    {errors[item.id]} The shortcut is kept so you can recover
-                    access or remove it.
-                  </p>
-                )}
-                <div className="workspace-card-bottom">
-                  <span>
-                    Updated {relativeTime(value?.updated_at ?? item.lastOpened)}
-                  </span>
-                  <button
-                    className="text-button"
-                    onClick={() => navigate(editorPath(item))}
-                  >
-                    Open <ArrowRight size={15} />
-                  </button>
-                </div>
-              </article>
-            );
-          })}
+              </div>
+              <h3>{item.name}</h3>
+              <p className="workspace-description">
+                {item.description || "Lessons, files and code examples."}
+              </p>
+              <div className="workspace-card-counts">
+                <FileCode2 size={14} /> {item.files} file
+                {item.files === 1 ? "" : "s"}
+                {item.folders
+                  ? ` · ${item.folders} folder${item.folders === 1 ? "" : "s"}`
+                  : ""}
+              </div>
+              <div className="workspace-card-bottom">
+                <span>Updated {relativeTime(item.updated_at)}</span>
+                <button
+                  className="text-button"
+                  onClick={() => {
+                    const lesson = readLocal<string | null>(
+                      "devshare.lastLesson." + item.id,
+                      null,
+                    );
+                    navigate(
+                      "/w/" +
+                        item.id +
+                        (lesson && /^[\w-]{36}$/.test(lesson)
+                          ? "?folder=" + lesson
+                          : ""),
+                    );
+                  }}
+                >
+                  Open <ArrowRight size={15} />
+                </button>
+              </div>
+            </article>
+          ))}
         </div>
       )}
       {!!activity.length && (
@@ -307,7 +303,7 @@ export default function WorkspaceDashboard({
             <div className="activity-row" key={event.id}>
               <span>
                 <strong>{activityText(event)}</strong>
-                <small>{details[item.id]?.name ?? item.name}</small>
+                <small>{item.name}</small>
               </span>
               <time dateTime={new Date(event.created_at).toISOString()}>
                 {relativeTime(event.created_at)}
@@ -318,9 +314,7 @@ export default function WorkspaceDashboard({
       )}
       {target && (
         <Modal
-          title={
-            mode === "rename" ? "Rename workspace" : "Remove from My Workspaces"
-          }
+          title={mode === "rename" ? "Rename workspace" : "Delete workspace?"}
           onClose={() => {
             if (!busy) setTarget(null);
           }}
@@ -331,23 +325,15 @@ export default function WorkspaceDashboard({
               setBusy(true);
               setError("");
               try {
-                if (mode === "remove") {
-                  forget(target.id);
-                  notify(
-                    "Local shortcut removed. Workspace content is preserved.",
-                  );
+                if (mode === "delete") {
+                  await api(`/rooms/${target.id}`, "DELETE");
+                  notify("Workspace permanently deleted");
                 } else {
-                  await api(
-                    `/rooms/${target.id}`,
-                    "PATCH",
-                    { name: draft },
-                    target.token,
-                  );
-                  remember({ ...target, name: draft.trim() });
+                  await api(`/rooms/${target.id}`, "PATCH", { name: draft });
                   notify("Workspace renamed");
                 }
-                setItems(shortcuts());
                 setTarget(null);
+                await load();
               } catch (e) {
                 setError((e as Error).message);
               } finally {
@@ -367,11 +353,21 @@ export default function WorkspaceDashboard({
                 />
               </label>
             ) : (
-              <p className="modal-description">
-                This removes only the shortcut from this browser. All folders,
-                files and code blocks remain on the server. Keep the private
-                editor link to open it again.
-              </p>
+              <>
+                <p className="modal-description">
+                  “{target.name}” and all of its folders, files and lessons will
+                  be permanently deleted for everyone, including students using
+                  its link. This cannot be undone.
+                </p>
+                <label className="field">
+                  Type the workspace name to confirm
+                  <input
+                    autoFocus
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                  />
+                </label>
+              </>
             )}
             {error && (
               <p className="error" role="alert">
@@ -388,10 +384,13 @@ export default function WorkspaceDashboard({
                 Cancel
               </button>
               <button
-                className="button primary"
-                disabled={busy || (mode === "rename" && !draft.trim())}
+                className={"button " + (mode === "delete" ? "danger" : "primary")}
+                disabled={
+                  busy ||
+                  (mode === "rename" ? !draft.trim() : draft !== target.name)
+                }
               >
-                {mode === "rename" ? "Save name" : "Remove shortcut"}
+                {mode === "rename" ? "Save name" : "Delete workspace"}
               </button>
             </div>
           </form>

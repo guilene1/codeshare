@@ -10,6 +10,8 @@ import { MonacoBinding } from "y-monaco";
 import * as Y from "yjs";
 import type { WebsocketProvider } from "y-websocket";
 import type { FileDoc, Settings } from "../lib";
+import { isDocumentLanguage } from "../markdown";
+import { attachDocumentBlocks } from "./editorBlocks";
 
 self.MonacoEnvironment = {
   getWorker(_id, label) {
@@ -92,8 +94,8 @@ monaco.editor.defineTheme("devshare-dark", {
   colors: {
     "editor.background": "#11151D",
     "editor.foreground": "#D6DFEB",
-    "editorLineNumber.foreground": "#4F5D72",
-    "editorLineNumber.activeForeground": "#B5C0D2",
+    "editorLineNumber.foreground": "#6E7C92",
+    "editorLineNumber.activeForeground": "#D6DFEB",
     "editor.lineHighlightBackground": "#181E29",
     "editor.selectionBackground": "#6366F145",
     "editorCursor.foreground": "#A5A8FF",
@@ -114,7 +116,8 @@ monaco.editor.defineTheme("devshare-light", {
     "editor.background": "#FFFFFF",
     "editor.foreground": "#263349",
     "editor.lineHighlightBackground": "#F5F7FB",
-    "editorLineNumber.foreground": "#A1AABB",
+    "editorLineNumber.foreground": "#7D889C",
+    "editorLineNumber.activeForeground": "#263349",
   },
 });
 
@@ -148,6 +151,8 @@ export default function CodeEditor({
   const cleanup = useRef<() => void>(() => {});
   const createBlockRef = useRef(onCreateBlock);
   createBlockRef.current = onCreateBlock;
+  const languageRef = useRef(file.language);
+  languageRef.current = file.language;
   const mount: OnMount = (editor) => {
     editorRef.current = editor;
     onEditor(editor);
@@ -195,7 +200,13 @@ export default function CodeEditor({
     const cursor = editor.onDidChangeCursorPosition((e) =>
       onPosition(e.position.lineNumber, e.position.column),
     );
+    // Documents (Markdown and Plain Text) get interactive code blocks; source files don't.
+    const blocks = attachDocumentBlocks(editor, {
+      isDocument: () => isDocumentLanguage(languageRef.current),
+      readOnly,
+    });
     cleanup.current = () => {
+      blocks();
       cursor.dispose();
       binding.destroy();
       undo.destroy();
@@ -240,7 +251,10 @@ export default function CodeEditor({
         insertSpaces: true,
         wordWrap: settings.wordWrap ? "on" : "off",
         minimap: { enabled: settings.minimap },
-        lineNumbers: settings.lineNumbers ? "on" : "off",
+        // Line numbers are always shown (every language, editors and students alike),
+        // so a stale per-browser preference can never hide the gutter.
+        lineNumbers: "on",
+        lineNumbersMinChars: 3,
         cursorStyle: settings.cursorStyle,
         padding: { top: 22, bottom: 20 },
         scrollBeyondLastLine: false,
@@ -254,6 +268,15 @@ export default function CodeEditor({
         overviewRulerBorder: false,
         hideCursorInOverviewRuler: true,
         contextmenu: true,
+        // Prose documents: word suggestions would capture Enter mid-sentence.
+        ...(isDocumentLanguage(file.language)
+          ? {
+              quickSuggestions: false,
+              suggestOnTriggerCharacters: false,
+              wordBasedSuggestions: "off" as const,
+              acceptSuggestionOnEnter: "off" as const,
+            }
+          : {}),
       }}
     />
   );

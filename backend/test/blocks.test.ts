@@ -8,6 +8,7 @@ import * as Y from "yjs";
 import { WebSocket } from "ws";
 import { WebsocketProvider } from "y-websocket";
 import { createApp } from "../src/app.js";
+import { createRoom } from "./helpers.js";
 import type { CodeBlock } from "../src/blocks.js";
 
 test("independent blocks broadcast, enforce permissions, validate order and survive SQLite restart", async () => {
@@ -27,7 +28,9 @@ test("independent blocks broadcast, enforce permissions, validate order and surv
     body?: unknown,
     editor = true,
   ) =>
-    fetch(`http://127.0.0.1:${port}/api${path}`, {
+    path === "/rooms" && method === "POST"
+      ? createRoom(app, `http://127.0.0.1:${port}`, body as Record<string, unknown>, origin)
+      : fetch(`http://127.0.0.1:${port}/api${path}`, {
       method,
       headers: {
         origin,

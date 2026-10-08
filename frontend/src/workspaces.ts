@@ -1,74 +1,48 @@
-import { api, readLocal, storeLocal } from "./lib";
+import { readLocal, storeLocal } from "./lib";
 export type Activity = {
   id: string;
   action: string;
   label: string;
   created_at: number;
 };
-export type WorkspaceSummary = {
+// A workspace owned by the signed-in account (from /api/me/workspaces).
+export type OwnedWorkspace = {
   id: string;
   name: string;
   description: string;
+  created_at: number;
   updated_at: number;
+  hasEditorLink: boolean;
   files: number;
-  blocks: number;
   folders: number;
   activity: Activity[];
 };
-export type Shortcut = {
-  id: string;
-  token: string;
-  name: string;
-  description: string;
-  lastOpened: number;
-  folder?: string | null;
-  file?: string;
-  view?: "editor" | "blocks";
-};
-const key = "devshare.workspaces.v1";
-export function shortcuts(): Shortcut[] {
-  const value = readLocal<unknown>(key, []);
+// v1 kept private editor shortcuts (including tokens) in localStorage. v2 only reads
+// them to offer a one-time import into the account, then deletes them.
+export type LegacyShortcut = { id: string; token: string; name: string };
+const legacyKey = "devshare.workspaces.v1";
+export function legacyShortcuts(): LegacyShortcut[] {
+  const value = readLocal<unknown>(legacyKey, []);
   if (!Array.isArray(value)) return [];
-  return value
-    .filter(
-      (item): item is Shortcut =>
-        item &&
-        typeof item.id === "string" &&
-        /^[\w-]{16}$/.test(item.id) &&
-        typeof item.token === "string" &&
-        /^[\w-]{43}$/.test(item.token) &&
-        typeof item.name === "string" &&
-        Number.isFinite(item.lastOpened),
-    )
-    .sort((a, b) => b.lastOpened - a.lastOpened);
-}
-export function remember(item: Shortcut) {
-  const existing = shortcuts();
-  storeLocal(key, [item, ...existing.filter((value) => value.id !== item.id)]);
-}
-export function forget(id: string) {
-  storeLocal(
-    key,
-    shortcuts().filter((value) => value.id !== id),
+  return value.filter(
+    (item): item is LegacyShortcut =>
+      item &&
+      typeof item.id === "string" &&
+      /^[\w-]{16}$/.test(item.id) &&
+      typeof item.token === "string" &&
+      /^[\w-]{43}$/.test(item.token) &&
+      typeof item.name === "string",
   );
 }
-export function editorPath(item: Shortcut) {
-  const query = new URLSearchParams();
-  if (item.folder) query.set("folder", item.folder);
-  if (item.file) query.set("file", item.file);
-  if (item.view === "blocks") query.set("view", "blocks");
-  return (
-    `/w/${item.id}/edit/${item.token}` +
-    (query.size ? "?" + query.toString() : "")
-  );
-}
-export async function summary(item: Shortcut) {
-  return api<WorkspaceSummary>(
-    `/rooms/${item.id}/summary`,
-    "GET",
-    undefined,
-    item.token,
-  );
+export function forgetLegacy(id: string) {
+  const remaining = legacyShortcuts().filter((value) => value.id !== id);
+  if (remaining.length) storeLocal(legacyKey, remaining);
+  else
+    try {
+      localStorage.removeItem(legacyKey);
+    } catch {
+      /* storage unavailable */
+    }
 }
 export function relativeTime(time: number) {
   const minutes = Math.max(0, Math.floor((Date.now() - time) / 60000));
@@ -87,6 +61,7 @@ export function activityText(item: Activity) {
   const verbs: Record<string, string> = {
     "workspace.created": "Created workspace",
     "workspace.renamed": "Renamed workspace",
+    "workspace.claimed": "Added to account",
     "folder.created": "Created folder",
     "folder.renamed": "Renamed folder",
     "folder.deleted": "Deleted folder",
@@ -96,6 +71,10 @@ export function activityText(item: Activity) {
     "block.created": "Added code block",
     "block.updated": "Updated code block",
     "block.deleted": "Deleted code block",
+    "blocks.migrated": "Moved snippets into a lesson",
+    "link.created": "Created",
+    "link.replaced": "Replaced",
+    "link.revoked": "Revoked",
   };
   return `${verbs[item.action] ?? "Updated workspace structure"} · ${item.label}`;
 }

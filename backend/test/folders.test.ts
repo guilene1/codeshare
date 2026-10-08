@@ -8,6 +8,7 @@ import * as Y from "yjs";
 import { WebSocket } from "ws";
 import { WebsocketProvider } from "y-websocket";
 import { createApp } from "../src/app.js";
+import { createRoom } from "./helpers.js";
 
 test("nested lessons load lazily, retain inactive course data, isolate sessions and authorize folder management", async () => {
   const dir = await mkdtemp(join(tmpdir(), "devshare-lessons-")),
@@ -21,7 +22,9 @@ test("nested lessons load lazily, retain inactive course data, isolate sessions 
   const token = randomBytes(32).toString("base64url"),
     hash = createHash("sha256").update(token).digest("hex");
   const request = (path: string, method = "GET", body?: unknown, edit = true) =>
-    fetch(`http://127.0.0.1:${port}/api${path}`, {
+    path === "/rooms" && method === "POST"
+      ? createRoom(app, `http://127.0.0.1:${port}`, body as Record<string, unknown>, origin)
+      : fetch(`http://127.0.0.1:${port}/api${path}`, {
       method,
       headers: {
         origin,

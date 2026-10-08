@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { createWorkspace, openFromExplorer, signUp } from "./helpers";
 test("instructor broadcasts to read-only students without leaking the private link", async ({
   browser,
 }) => {
@@ -10,28 +11,24 @@ test("instructor broadcasts to read-only students without leaking the private li
   owner.on("pageerror", (e) => errors.push(e.message));
   viewer.on("pageerror", (e) => errors.push(e.message));
   try {
-    await owner.goto("/");
-    await owner
-      .getByRole("button", { name: "Create Workspace", exact: true })
-      .click();
-    await owner.getByLabel("Your name").fill("Instructor");
-    await owner.getByLabel("Workspace name").fill("Cloud classroom");
-    await owner
-      .getByRole("dialog")
-      .getByRole("button", { name: "Create Workspace", exact: true })
-      .click();
-    await expect(owner.getByLabel("Workspace access")).toContainText("Editing");
-    await expect(owner.locator(".status-bar")).toContainText("Connected");
-    const privateUrl = owner.url(),
-      token = privateUrl.split("/edit/")[1];
+    await signUp(owner, "Instructor");
+    const ownerUrl = await createWorkspace(owner, "Cloud classroom");
     await owner.getByRole("button", { name: "Share", exact: true }).click();
     const studentUrl = await owner
       .getByLabel("Student link", { exact: true })
       .inputValue();
-    expect(studentUrl).toBe(privateUrl.split("/edit/")[0]);
+    // The owner edits through the account, so the Student Link is the plain URL.
+    expect(studentUrl).toBe(ownerUrl);
     await expect(
       owner.getByLabel("Private editor link", { exact: true }),
-    ).toHaveAttribute("type", "password");
+    ).toHaveCount(0);
+    await owner
+      .getByRole("button", { name: "Create co-editor link", exact: true })
+      .click();
+    const token = (
+      await owner.getByLabel("Private editor link", { exact: true }).inputValue()
+    ).split("/edit/")[1];
+    expect(token).toMatch(/^[\w-]{43}$/);
     await expect(
       owner.getByRole("button", { name: "Copy Editor Link", exact: true }),
     ).toBeVisible();
@@ -87,7 +84,7 @@ test("instructor broadcasts to read-only students without leaking the private li
     );
     await student.grantPermissions(["clipboard-read", "clipboard-write"]);
     await viewer
-      .getByRole("button", { name: "Copy code", exact: true })
+      .getByRole("button", { name: "Copy file", exact: true })
       .click();
     expect(
       await viewer.evaluate(() => navigator.clipboard.readText()),
@@ -155,12 +152,7 @@ test("instructor broadcasts to read-only students without leaking the private li
     await owner
       .getByRole("button", { name: "Create file", exact: true })
       .click();
-    await expect(
-      viewer.getByRole("tab", { name: "lesson-variables.tf", exact: true }),
-    ).toBeVisible();
-    await viewer
-      .getByRole("tab", { name: "lesson-variables.tf", exact: true })
-      .click();
+    await openFromExplorer(viewer, "lesson-variables.tf");
     await owner.getByLabel("Programming language").selectOption("python");
     await expect(viewer.getByLabel("File language")).toHaveText("python");
     await owner

@@ -91,6 +91,19 @@ export function storeLocal(key: string, value: unknown) {
     /* Private browsers may restrict storage. */
   }
 }
+// The CSRF token lives only in memory; the session itself is an HttpOnly cookie.
+let csrfToken = "";
+export function setCsrfToken(value: string | undefined) {
+  csrfToken = value ?? "";
+}
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public status: number,
+  ) {
+    super(message);
+  }
+}
 export async function api<T = { ok: boolean }>(
   path: string,
   method = "GET",
@@ -99,33 +112,21 @@ export async function api<T = { ok: boolean }>(
 ): Promise<T> {
   const response = await fetch("/api" + path, {
     method,
+    credentials: "same-origin",
     headers: {
       "Content-Type": "application/json",
       ...(editorToken ? { Authorization: `Bearer ${editorToken}` } : {}),
+      ...(csrfToken && method !== "GET" ? { "X-CSRF-Token": csrfToken } : {}),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  const result = await response.json();
+  const result = await response.json().catch(() => ({}));
   if (!response.ok)
-    throw new Error(result.error ?? "Something went wrong. Try again.");
+    throw new ApiError(
+      result.error ?? "Something went wrong. Try again.",
+      response.status,
+    );
   return result;
-}
-export async function createEditorCredential() {
-  const bytes = crypto.getRandomValues(new Uint8Array(32));
-  const token = btoa(String.fromCharCode(...bytes))
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(token),
-  );
-  return {
-    token,
-    hash: Array.from(new Uint8Array(digest), (value) =>
-      value.toString(16).padStart(2, "0"),
-    ).join(""),
-  };
 }
 export function initials(name: string) {
   return name

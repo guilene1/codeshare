@@ -6,7 +6,13 @@ import * as awareness from "y-protocols/awareness";
 import { WebSocket, WebSocketServer } from "ws";
 import type { Server } from "node:http";
 import { Rooms, validateDocument, type Room } from "./rooms.js";
-import { hashEditorToken, TOKEN_PATTERN } from "./access.js";
+import {
+  hashEditorToken,
+  TOKEN_PATTERN,
+  workspaceAccess,
+  type Auth,
+} from "./access.js";
+import type { Accounts } from "./auth.js";
 
 function send(peer: WebSocket, data: Uint8Array) {
   if (peer.readyState === WebSocket.OPEN) {
@@ -62,6 +68,7 @@ export function setupWebsocket(
   server: Server,
   rooms: Rooms,
   origins: Set<string>,
+  accounts: Accounts,
 ) {
   const wss = new WebSocketServer({
     noServer: true,
@@ -99,6 +106,21 @@ export function setupWebsocket(
       const token = credentials[0]?.slice(7);
       const credentialHash =
         token && TOKEN_PATTERN.test(token) ? hashEditorToken(token) : undefined;
+      // Browsers send the session cookie with same-origin upgrades; the Origin check above
+      // prevents cross-site WebSocket hijacking.
+      const session = accounts.session(accounts.tokenFrom(req));
+      const auth: Auth = {
+        userId: session?.user.id,
+        sessionHash: session?.tokenHash,
+        tokenHash: credentialHash,
+      };
+      const canEdit = () =>
+        workspaceAccess(
+          rooms.db,
+          (hash, user) => accounts.sessionValid(hash, user),
+          room.workspaceId,
+          auth,
+        ) !== "viewer";
       if (
         credentials.length &&
         (credentials.length !== 1 ||
@@ -111,6 +133,7 @@ export function setupWebsocket(
       wss.handleUpgrade(req, socket, head, (peer) => {
         wire(room);
         room.peers.set(peer, new Set());
+        rooms.connections.set(peer, auth);
         room.touched = Date.now();
         let alive = true,
           count = 0,
@@ -156,7 +179,7 @@ export function setupWebsocket(
                 );
                 send(peer, encoding.toUint8Array(enc));
               } else if (subtype === 1 || subtype === 2) {
-                if (!rooms.canEditHash(room.workspaceId, credentialHash))
+                if (!canEdit())
                   throw new Error(
                     "View-only access: document changes are not permitted",
                   );
@@ -184,6 +207,11 @@ export function setupWebsocket(
                     JSON.stringify(room.doc.getMap("workspace").toJSON())
                   )
                     throw new Error("Use the workspace API");
+                  if (
+                    JSON.stringify(candidate.getMap("migrations").toJSON()) !==
+                    JSON.stringify(room.doc.getMap("migrations").toJSON())
+                  )
+                    throw new Error("Use the migration API");
                   const after = candidate.getMap<Y.Map<unknown>>("documents");
                   if (after.size !== before.size)
                     throw new Error("Use the file API");
@@ -224,6 +252,7 @@ export function setupWebsocket(
               // Bound malformed batches by their payload, not classroom size.
               if (n > Math.floor(data.byteLength / 3))
                 throw new Error("Invalid presence batch");
+              const editing = canEdit();
               const accepted: Array<{
                 id: number;
                 clock: number;
@@ -242,7 +271,8 @@ export function setupWebsocket(
                 if (!ids.size && state === null) continue;
                 if (
                   state !== null &&
-                  rooms.canEditHash(room.workspaceId, credentialHash) &&
+                  editing &&
+                  !session &&
                   (!state.user ||
                     typeof state.user.name !== "string" ||
                     state.user.name.length > 40 ||
@@ -257,23 +287,23 @@ export function setupWebsocket(
                 const safeState =
                   state === null
                     ? null
-                    : rooms.canEditHash(room.workspaceId, credentialHash)
+                    : editing
                       ? {
                           user: {
-                            name: state.user.name,
-                            color: state.user.color,
+                            // Signed-in editors are shown by their verified account name.
+                            name: session
+                              ? session.user.displayName.slice(0, 40)
+                              : (state.user.name as string),
+                            color: /^#[0-9a-f]{6}$/i.test(state.user?.color)
+                              ? state.user.color
+                              : "#a78bfa",
                           },
                           fileId:
                             typeof state.fileId === "string"
                               ? state.fileId.slice(0, 80)
                               : undefined,
                           selection: state.selection,
-                          role: rooms.canEditHash(
-                            room.workspaceId,
-                            credentialHash,
-                          )
-                            ? "editor"
-                            : "viewer",
+                          role: "editor",
                         }
                       : { viewer: true, role: "viewer" };
                 accepted.push({ id, clock, json: JSON.stringify(safeState) });
@@ -315,6 +345,7 @@ export function setupWebsocket(
         peer.on("error", () => peer.terminate());
         peer.on("close", () => {
           clearInterval(heartbeat);
+          rooms.connections.delete(peer);
           const ids = room.peers.get(peer);
           for (const id of ids ?? []) room.awarenessOwners.delete(id);
           room.peers.delete(peer);
@@ -330,8 +361,7 @@ export function setupWebsocket(
         encoding.writeVarUint(enc, 0);
         sync.writeSyncStep1(enc, room.doc);
         // A viewer only pulls server state; do not request its potentially modified local document.
-        if (rooms.canEditHash(room.workspaceId, credentialHash))
-          send(peer, encoding.toUint8Array(enc));
+        if (canEdit()) send(peer, encoding.toUint8Array(enc));
         const states = [...room.awareness.getStates().keys()];
         if (states.length) {
           const e = encoding.createEncoder();

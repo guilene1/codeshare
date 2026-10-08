@@ -134,7 +134,6 @@ export default function SettingsPanel({
           [
             ["wordWrap", "Word wrap"],
             ["minimap", "Minimap"],
-            ["lineNumbers", "Line numbers"],
             ["autoSave", "Auto-save checkpoint"],
           ] as const
         )

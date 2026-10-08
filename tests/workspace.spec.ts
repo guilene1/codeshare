@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { createWorkspace, openFromExplorer, signUp } from "./helpers";
 test("two isolated browsers collaborate with real Monaco, cursor presence, files and persistent preferences", async ({
   browser,
 }) => {
@@ -18,19 +19,22 @@ test("two isolated browsers collaborate with real Monaco, cursor presence, files
       path: "test-results/landing-dark.png",
       fullPage: true,
     });
-    await first
-      .getByRole("button", { name: "Create Workspace", exact: true })
-      .click();
-    await first.getByLabel("Your name").fill("Alex");
-    await first.getByLabel("Workspace name").fill("Terraform workshop");
-    await first
-      .getByRole("dialog")
-      .getByRole("button", { name: "Create Workspace", exact: true })
-      .click();
-    await expect(first).toHaveURL(/\/w\/[\w-]{16}\/edit\/[\w-]{43}$/);
-    await expect(first.locator(".status-bar")).toContainText("Connected");
+    // Creating a workspace requires an account; the owner's URL carries no secret.
+    await signUp(first, "Alex");
+    await createWorkspace(first, "Terraform workshop");
+    await expect(first).toHaveURL(/\/w\/[\w-]{16}$/);
     await expect(first.locator(".monaco-editor textarea")).toBeVisible();
-    await second.goto(first.url());
+    // A co-teacher without an account joins through a private co-editor link.
+    await first.getByRole("button", { name: "Share", exact: true }).click();
+    await first
+      .getByRole("button", { name: "Create co-editor link", exact: true })
+      .click();
+    const editorLink = await first
+      .getByLabel("Private editor link", { exact: true })
+      .inputValue();
+    expect(editorLink).toMatch(/\/w\/[\w-]{16}\/edit\/[\w-]{43}$/);
+    await first.getByRole("button", { name: "Close dialog" }).click();
+    await second.goto(editorLink);
     await second.getByLabel("Your name").fill("Sam");
     await second
       .getByRole("button", { name: "Open Workspace", exact: true })
@@ -52,7 +56,7 @@ test("two isolated browsers collaborate with real Monaco, cursor presence, files
     ).toBeVisible();
     await first.screenshot({ path: "test-results/workspace-dark.png" });
     await a.grantPermissions(["clipboard-read", "clipboard-write"]);
-    await first.getByRole("button", { name: "Copy code", exact: true }).click();
+    await first.getByRole("button", { name: "Copy file", exact: true }).click();
     const copied = await first.evaluate(() => navigator.clipboard.readText());
     expect(copied).toContain("# Shared lesson");
     expect(copied).toContain("# Sam is here");
@@ -97,9 +101,8 @@ test("two isolated browsers collaborate with real Monaco, cursor presence, files
         first.getByRole("tab", { name: filename, exact: true }),
       ).toBeVisible();
     }
-    await expect(
-      second.getByRole("tab", { name: "lesson-outputs.tf", exact: true }),
-    ).toBeVisible();
+    // New files appear in everyone's Explorer; tabs are personal.
+    await openFromExplorer(second, "lesson-outputs.tf");
     await expect(first.getByLabel("Programming language")).toHaveValue(
       "markdown",
     );
@@ -109,7 +112,7 @@ test("two isolated browsers collaborate with real Monaco, cursor presence, files
     await first.getByLabel("Filename", { exact: true }).fill("lesson.md");
     await first.getByRole("button", { name: "Save name", exact: true }).click();
     await expect(
-      second.getByRole("tab", { name: "lesson.md", exact: true }),
+      second.locator(".sidebar").getByRole("button", { name: "lesson.md", exact: true }),
     ).toBeVisible();
     await first
       .getByRole("button", { name: "Delete file", exact: true })
@@ -119,7 +122,10 @@ test("two isolated browsers collaborate with real Monaco, cursor presence, files
       .getByRole("button", { name: "Delete file", exact: true })
       .click();
     await expect(
-      second.getByRole("tab", { name: "lesson.md", exact: true }),
+      second.locator(".sidebar").getByRole("button", { name: "lesson.md", exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      first.getByRole("tab", { name: "lesson.md", exact: true }),
     ).toHaveCount(0);
     await first.getByRole("tab", { name: "main.tf", exact: true }).click();
     await first.keyboard.press("Control+s");
@@ -153,7 +159,7 @@ test("two isolated browsers collaborate with real Monaco, cursor presence, files
     );
     await expect
       .poll(() => first.evaluate(() => navigator.clipboard.readText()))
-      .toBe(first.url().split("/edit/")[0]);
+      .toBe(first.url());
     await first.getByRole("button", { name: "Close dialog" }).click();
     await second.close();
     await expect(first.locator(".sidebar-people")).not.toContainText("Sam");

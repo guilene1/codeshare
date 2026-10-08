@@ -2,7 +2,7 @@ import { createApp } from "./app.js";
 const app = createApp(),
   port = Number(process.env.PORT ?? 3000);
 app.server.listen(port, "0.0.0.0", () =>
-  console.log(`DevShare listening on :${port}`),
+  console.log(`Kodelumi listening on :${port}`),
 );
 let stopping = false;
 for (const signal of ["SIGINT", "SIGTERM"])

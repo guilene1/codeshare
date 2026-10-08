@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { randomBytes, createHash } from "node:crypto";
-const editorToken = randomBytes(32).toString("base64url"),
-  editorTokenHash = createHash("sha256").update(editorToken).digest("hex");
+import { randomBytes } from "node:crypto";
+// v2: an account owns the workspace; socket clients edit through a co-editor link.
+let editorToken, owner;
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import * as Y from "yjs";
@@ -62,7 +62,7 @@ const request = (path, method = "GET", body) =>
     headers: {
       origin,
       "content-type": "application/json",
-      Authorization: "Bearer " + editorToken,
+      ...(editorToken ? { Authorization: "Bearer " + editorToken } : owner),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -83,14 +83,29 @@ try {
       return false;
     }
   });
+  const password = randomBytes(18).toString("base64url") + "-Dv1";
+  const signup = await request("/auth/signup", "POST", {
+    displayName: "Docker verifier",
+    email: `docker-verify-${Date.now()}@example.test`,
+    password,
+    confirmPassword: password,
+  });
+  assert.equal(signup.status, 201);
+  const sessionCookie = signup.headers.get("set-cookie").split(";")[0];
+  owner = {
+    cookie: sessionCookie,
+    "x-csrf-token": (await signup.json()).csrfToken,
+  };
   const result = await request("/rooms", "POST", {
     name: "Docker persistence verification",
     description: "Permanent lessons and activity",
     language: "hcl",
-    editorTokenHash,
   });
   assert.equal(result.status, 201);
   const room = await result.json();
+  const link = await request(`/rooms/${room.id}/editor-link`, "POST", {});
+  assert.equal(link.status, 201);
+  editorToken = (await link.json()).token;
   const a = client(room.id, "Alex"),
     b = client(room.id, "Sam");
   await until(() => a.synced && b.synced);
@@ -180,17 +195,16 @@ try {
   b.doc.destroy();
   verificationBrowser = await chromium.launch({ headless: true });
   const context = await verificationBrowser.newContext();
+  // The browser is the signed-in owner: no credential appears in the URL.
+  const [cookieName, cookieValue] = sessionCookie.split("=");
+  await context.addCookies([
+    { name: cookieName, value: cookieValue, url: origin, httpOnly: true, sameSite: "Lax" },
+  ]);
   const page = await context.newPage();
   const browserErrors = [];
   page.on("pageerror", (error) => browserErrors.push(error.message));
-  await page.addInitScript(
-    ({ id }) => {
-      localStorage.setItem("devshare.name." + id, JSON.stringify("Instructor"));
-    },
-    { id: room.id },
-  );
   await page.goto(
-    `${origin}/w/${room.id}/edit/${editorToken}?folder=${folder.id}&file=${lessonFile.id}`,
+    `${origin}/w/${room.id}?folder=${folder.id}&file=${lessonFile.id}`,
   );
   await expect(page.getByLabel("Workspace access")).toContainText("Editing");
   await expect(page.locator(".view-lines")).toContainText(
@@ -204,7 +218,7 @@ try {
     name: "Docker persistence verification",
     exact: true,
   });
-  await expect(card).toContainText("2 files · 1 code block");
+  await expect(card).toContainText("2 files · 1 folder");
   await execute("docker", [...compose, "restart", "application"]);
   await until(async () => {
     try {
@@ -215,7 +229,7 @@ try {
   });
   await page.reload();
   await expect(card).toContainText("Permanent lessons and activity");
-  await expect(card).toContainText("2 files · 1 code block");
+  await expect(card).toContainText("2 files · 1 folder");
   await card.getByRole("button", { name: "Open", exact: true }).click();
   await expect(page.locator(".view-lines")).toContainText(
     "Folder lesson persists across Docker restart",
@@ -234,8 +248,12 @@ try {
   );
   const persistedBlocks = await (await request(blocksPath)).json();
   assert.equal(persistedBlocks.blocks[0].content, snippetContent);
+  // v2: private summaries are owner-only (the co-editor link gets 404).
+  assert.equal((await request("/rooms/" + room.id + "/summary")).status, 404);
   const dashboard = await (
-    await request("/rooms/" + room.id + "/summary")
+    await fetch(origin + "/api/rooms/" + room.id + "/summary", {
+      headers: { origin, ...owner },
+    })
   ).json();
   assert.equal(dashboard.description, "Permanent lessons and activity");
   assert.equal(dashboard.files, 2);

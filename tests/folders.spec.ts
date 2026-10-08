@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { createWorkspace, openFromExplorer, signUp } from "./helpers";
 
 test("six-month course explorer navigates nested lessons, highlights Terraform/Python/YAML and protects student management", async ({
   browser,
@@ -11,17 +12,8 @@ test("six-month course explorer navigates nested lessons, highlights Terraform/P
   owner.on("pageerror", (error) => errors.push(error.message));
   viewer.on("pageerror", (error) => errors.push(error.message));
   try {
-    await owner.goto("/");
-    await owner
-      .getByRole("button", { name: "Create Workspace", exact: true })
-      .click();
-    await owner.getByLabel("Your name").fill("Instructor");
-    await owner.getByLabel("Workspace name").fill("DevOps Class");
-    await owner
-      .getByRole("dialog")
-      .getByRole("button", { name: "Create Workspace", exact: true })
-      .click();
-    await expect(owner.locator(".status-bar")).toContainText("Connected");
+    await signUp(owner, "Instructor");
+    await createWorkspace(owner, "DevOps Class");
     async function folder(name: string) {
       await owner
         .getByRole("button", { name: "Create folder", exact: true })
@@ -80,7 +72,19 @@ test("six-month course explorer navigates nested lessons, highlights Terraform/P
     await owner
       .getByRole("button", { name: "Move file up", exact: true })
       .click();
-    await expect(owner.getByRole("tab").nth(1)).toHaveText("deployment.yaml");
+    // File order is shared course structure (tabs follow each user's open order).
+    await expect
+      .poll(() =>
+        owner.evaluate(async () => {
+          const id = location.pathname.split("/")[2],
+            folder = new URLSearchParams(location.search).get("folder");
+          const tree = await (await fetch(`/api/rooms/${id}/tree`)).json();
+          return tree.documents
+            .filter((d: { folder_id: string | null }) => d.folder_id === folder)
+            .map((d: { filename: string }) => d.filename);
+        }),
+      )
+      .toEqual(["main.tf", "deployment.yaml", "hello.py"]);
     await folder("Examples");
     await owner.getByRole("button", { name: "Share", exact: true }).click();
     const studentLink = await owner
@@ -95,9 +99,11 @@ test("six-month course explorer navigates nested lessons, highlights Terraform/P
     await expect(viewer.getByLabel("Workspace access")).toContainText(
       "View Only",
     );
+    // The lesson opens with its first file; other files open from the Explorer.
     await expect(
-      viewer.getByRole("tab", { name: "deployment.yaml", exact: true }),
+      viewer.getByRole("tab", { name: "main.tf", exact: true }),
     ).toBeVisible();
+    await openFromExplorer(viewer, "deployment.yaml");
     await expect(
       viewer.getByRole("button", { name: "Create folder", exact: true }),
     ).toHaveCount(0);
@@ -130,43 +136,47 @@ test("six-month course explorer navigates nested lessons, highlights Terraform/P
         exact: true,
       })
       .click();
+    // Remembered tabs are restored per lesson.
     await expect(
-      viewer.getByRole("tab", { name: "hello.py", exact: true }),
+      viewer.getByRole("tab", { name: "deployment.yaml", exact: true }),
     ).toBeVisible();
-    await owner
-      .getByRole("button", { name: "Code Blocks", exact: false })
-      .click();
-    await owner
-      .getByRole("button", { name: "Add Code Block", exact: true })
-      .click();
+    await openFromExplorer(viewer, "hello.py");
+    // Lesson code blocks live inside the lesson's Markdown document.
+    await owner.getByRole("button", { name: "New file", exact: true }).click();
+    await owner.getByLabel("Filename", { exact: true }).fill("lesson.md");
     await owner
       .getByRole("dialog")
-      .getByRole("textbox", { name: "Code", exact: true })
-      .fill("terraform init");
+      .getByRole("button", { name: "Create file", exact: true })
+      .click();
+    await expect(owner.getByRole("tab", { name: "lesson.md", exact: true })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await owner.getByRole("button", { name: "Insert Code Block", exact: true }).click();
+    await owner.getByLabel("Code block language").selectOption("shell");
+    await owner.getByLabel("Code block content").fill("terraform init");
     await owner
       .getByRole("dialog")
-      .getByRole("combobox", { name: "Language", exact: true })
-      .selectOption("shell");
-    await owner.getByRole("button", { name: "Add Block", exact: true }).click();
-    await viewer
-      .getByRole("button", { name: "Code Blocks", exact: false })
+      .getByRole("button", { name: "Insert Code Block", exact: true })
       .click();
-    await expect(
-      viewer.getByRole("article", { name: "terraform init", exact: true }),
-    ).toBeVisible();
+    await openFromExplorer(viewer, "lesson.md");
+    await expect(viewer.locator(".inline-block")).toContainText("terraform init");
+    await expect(viewer.locator(".inline-block-label")).toHaveText(
+      "Bash / Shell",
+    );
     await owner
       .getByRole("button", { name: "Open folder Examples", exact: true })
       .click();
-    await expect(owner.locator(".snippet-card")).toHaveCount(0);
+    await expect(owner.locator(".inline-block")).toHaveCount(0);
     await owner
       .getByRole("button", {
         name: "Open folder Week 04 - Terraform",
         exact: true,
       })
       .click();
-    await expect(
-      owner.getByRole("article", { name: "terraform init", exact: true }),
-    ).toBeVisible();
+    await owner.getByRole("tab", { name: "lesson.md", exact: true }).click();
+    await owner.getByRole("button", { name: "Preview", exact: true }).click();
+    await expect(owner.locator(".inline-block")).toContainText("terraform init");
     await owner
       .getByRole("button", { name: "Editor settings", exact: true })
       .click();

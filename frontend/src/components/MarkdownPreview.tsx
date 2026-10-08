@@ -1,7 +1,31 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Check, Copy } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  Check,
+  Copy,
+  Pencil,
+  Plus,
+  Trash2,
+} from "lucide-react";
+import type * as Y from "yjs";
 import type { FileDoc } from "../lib";
+import {
+  deleteSegment,
+  fence,
+  insertBlock,
+  languageId,
+  languageLabel,
+  moveSegment,
+  parseMarkdown,
+  replaceSegment,
+  type CodeSegment,
+  type Segment,
+  type TextEdit,
+} from "../markdown";
+import CodeBlockDialog from "./CodeBlockDialog";
 
+// Source text is rendered only as React text nodes; links are limited to safe schemes.
 function inline(text: string): ReactNode[] {
   const parts = text.split(
     /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^\s)]+\))/g,
@@ -14,7 +38,6 @@ function inline(text: string): ReactNode[] {
     if (part.startsWith("*")) return <em key={index}>{part.slice(1, -1)}</em>;
     const link = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(part);
     if (link) {
-      // Render source HTML as text and allow only safe web/mail/anchor links.
       if (/^(https?:\/\/|mailto:|#)/i.test(link[2]))
         return (
           <a
@@ -31,14 +54,22 @@ function inline(text: string): ReactNode[] {
     return part;
   });
 }
-function FencedCode({
-  content,
-  language,
+
+function InlineCodeBlock({
+  segment,
   dark,
+  actions,
+  firstLine,
+  codeLines,
+  closeLine,
 }: {
-  content: string;
-  language: string;
+  segment: CodeSegment;
   dark: boolean;
+  actions?: ReactNode;
+  // 1-based source line of the opening fence, number of code lines, closing fence line.
+  firstLine: number;
+  codeLines: number;
+  closeLine?: number;
 }) {
   const [html, setHtml] = useState("");
   const [copied, setCopied] = useState(false);
@@ -46,25 +77,11 @@ function FencedCode({
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => {
     let canceled = false;
-    const aliases: Record<string, string> = {
-      bash: "shell",
-      sh: "shell",
-      terraform: "hcl",
-      tf: "hcl",
-      js: "javascript",
-      ts: "typescript",
-      py: "python",
-      yml: "yaml",
-      text: "plaintext",
-    };
     setHtml("");
     import("./CodeEditor")
       .then((module) =>
-        module.colorizeCode(
-          content,
-          (aliases[language] ?? language) || "plaintext",
-          dark,
-        ),
+        // Monaco's colorizer escapes the code; the result contains only its own spans.
+        module.colorizeCode(segment.content, languageId(segment.language), dark),
       )
       .then((value) => {
         if (!canceled) setHtml(value);
@@ -73,152 +90,290 @@ function FencedCode({
     return () => {
       canceled = true;
     };
-  }, [content, language, dark]);
+  }, [segment.content, segment.language, dark]);
   useEffect(() => () => clearTimeout(timer.current), []);
+  const plainLines = segment.content.split("\n");
+  const colored = html
+    .replace(/^\s*<div[^>]*>/, "")
+    .replace(/<\/div>\s*$/, "")
+    .split(/<br\s*\/?>/);
+  const lineHtml = html && colored.length === plainLines.length ? colored : null;
   return (
-    <div className="markdown-code">
-      <div>
-        <span>{language || "Plain text"}</span>
-        <button
-          className="snippet-copy"
-          onClick={async () => {
-            try {
-              await navigator.clipboard.writeText(content);
-              setCopied(true);
-              setError("");
-              clearTimeout(timer.current);
-              timer.current = setTimeout(() => setCopied(false), 2000);
-            } catch {
-              setError("Select the code and press Ctrl / ⌘ C.");
-            }
-          }}
-        >
-          {copied ? <Check size={14} /> : <Copy size={14} />}
-          {copied ? "Copied" : "Copy"}
-        </button>
+    <div className="markdown-code inline-block" data-language={segment.language}>
+      <div className="inline-block-header pv-line" data-line={firstLine}>
+        <span className="inline-block-label">
+          {languageLabel(segment.language)}
+        </span>
+        <span className="inline-block-actions">
+          {actions}
+          <button
+            className="snippet-copy"
+            onClick={async () => {
+              try {
+                await navigator.clipboard.writeText(segment.content);
+                setCopied(true);
+                setError("");
+                clearTimeout(timer.current);
+                timer.current = setTimeout(() => setCopied(false), 2000);
+              } catch {
+                setError("Select the code and press Ctrl / ⌘ C.");
+              }
+            }}
+          >
+            {copied ? <Check size={14} /> : <Copy size={14} />}
+            {copied ? "Copied!" : "Copy code"}
+          </button>
+        </span>
       </div>
       <pre>
         <code>
-          {html ? <span dangerouslySetInnerHTML={{ __html: html }} /> : content}
+          {Array.from({ length: codeLines }, (_, k) =>
+            // Monaco's colorizer joins lines with <br/>; each line gets its own number.
+            lineHtml?.[k] !== undefined ? (
+              <span
+                key={k}
+                className="pv-line pv-code-line"
+                data-line={firstLine + 1 + k}
+                dangerouslySetInnerHTML={{ __html: lineHtml[k] }}
+              />
+            ) : (
+              <span key={k} className="pv-line pv-code-line" data-line={firstLine + 1 + k}>
+                {plainLines[k]}
+              </span>
+            ),
+          )}
         </code>
       </pre>
+      {closeLine !== undefined && (
+        <div className="pv-line pv-fence-end" data-line={closeLine} />
+      )}
       {error && <p role="alert">{error}</p>}
     </div>
   );
 }
+
+// Applies a text edit only if the targeted element is still exactly as rendered, so a
+// collaborator's concurrent change is never silently overwritten.
+function applyEdit(
+  text: Y.Text,
+  expected: { start: number; raw: string },
+  edit: (source: string, segments: Segment[], index: number) => TextEdit | null,
+) {
+  const source = text.toString(),
+    segments = parseMarkdown(source);
+  const index = segments.findIndex(
+    (s) =>
+      s.start === expected.start && source.slice(s.start, s.end) === expected.raw,
+  );
+  if (index < 0) return false;
+  const change = edit(source, segments, index);
+  if (!change) return true;
+  text.doc!.transact(() => {
+    if (change.remove) text.delete(change.start, change.remove);
+    if (change.insert) text.insert(change.start, change.insert);
+  });
+  return true;
+}
+
 export default function MarkdownPreview({
   file,
   dark,
   fontSize,
+  canEdit = false,
+  plain = false,
+  notify,
 }: {
   file: FileDoc;
   dark: boolean;
   fontSize: number;
+  canEdit?: boolean;
+  plain?: boolean;
+  notify?: (message: string) => void;
 }) {
   const [source, setSource] = useState(() => file.content.toString());
+  const [editing, setEditing] = useState<
+    { segment: CodeSegment; raw: string } | "new" | null
+  >(null);
   useEffect(() => {
     const update = () => setSource(file.content.toString());
     update();
     file.content.observe(update);
     return () => file.content.unobserve(update);
   }, [file.content]);
-  const lines = source.replace(/\r\n/g, "\n").split("\n");
-  const output: ReactNode[] = [];
-  let index = 0;
-  while (index < lines.length) {
-    const start = index,
-      line = lines[index];
-    if (!line.trim()) {
-      index++;
-      continue;
+  const segments = parseMarkdown(source, plain);
+  // Source line numbers: students see the same numbers as the instructor's editor.
+  const lineStarts = [0];
+  for (let i = 0; i < source.length; i++)
+    if (source[i] === "\n") lineStarts.push(i + 1);
+  const lineOf = (offset: number) => {
+    let low = 0,
+      high = lineStarts.length - 1;
+    while (low < high) {
+      const mid = (low + high + 1) >> 1;
+      if (lineStarts[mid] <= offset) low = mid;
+      else high = mid - 1;
     }
-    const fence = /^\s*(`{3,}|~{3,})([\w-]*)\s*$/.exec(line);
-    if (fence) {
-      const code: string[] = [];
-      index++;
-      while (
-        index < lines.length &&
-        !new RegExp(`^\\s*${fence[1][0]}{${fence[1].length},}\\s*$`).test(
-          lines[index],
-        )
-      )
-        code.push(lines[index++]);
-      if (index < lines.length) index++;
-      output.push(
-        <FencedCode
-          key={start}
-          content={code.join("\n")}
-          language={fence[2]}
-          dark={dark}
-        />,
-      );
-      continue;
-    }
-    const heading = /^(#{1,6})\s+(.+)$/.exec(line);
-    if (heading) {
-      const text = inline(heading[2]);
-      const level = heading[1].length;
-      output.push(
-        level === 1 ? (
-          <h1 key={start}>{text}</h1>
-        ) : level === 2 ? (
-          <h2 key={start}>{text}</h2>
-        ) : (
-          <h3 key={start}>{text}</h3>
-        ),
-      );
-      index++;
-      continue;
-    }
-    if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line)) {
-      output.push(<hr key={start} />);
-      index++;
-      continue;
-    }
-    if (/^\s*>/.test(line)) {
-      const quote: string[] = [];
-      while (index < lines.length && /^\s*>/.test(lines[index]))
-        quote.push(lines[index++].replace(/^\s*>\s?/, ""));
-      output.push(
-        <blockquote key={start}>{inline(quote.join(" "))}</blockquote>,
-      );
-      continue;
-    }
-    const list = /^\s*(?:[-*+]\s+|\d+\.\s+)/.test(line);
-    if (list) {
-      const ordered = /^\s*\d+\./.test(line),
-        entries: ReactNode[] = [];
-      while (
-        index < lines.length &&
-        (ordered
-          ? /^\s*\d+\.\s+/.test(lines[index])
-          : /^\s*[-*+]\s+/.test(lines[index]))
-      ) {
-        const entry = lines[index++].replace(/^\s*(?:[-*+]\s+|\d+\.\s+)/, "");
-        entries.push(<li key={index}>{inline(entry)}</li>);
-      }
-      output.push(
-        ordered ? (
-          <ol key={start}>{entries}</ol>
-        ) : (
-          <ul key={start}>{entries}</ul>
-        ),
-      );
-      continue;
-    }
-    const paragraph: string[] = [line];
-    index++;
-    while (
-      index < lines.length &&
-      lines[index].trim() &&
-      !/^\s*(?:#{1,6}\s|`{3}|~{3}|>|[-*+]\s|\d+\.\s)/.test(lines[index])
-    )
-      paragraph.push(lines[index++]);
-    output.push(<p key={start}>{inline(paragraph.join("\n"))}</p>);
+    return low;
+  };
+  const sourceLine = (n: number) =>
+    source
+      .slice(lineStarts[n], (lineStarts[n + 1] ?? source.length + 1) - 1)
+      .replace(/\r$/, "");
+  const range = (from: number, to: number) =>
+    Array.from({ length: Math.max(0, to - from + 1) }, (_, i) => from + i);
+  const blank = (n: number) => (
+    <div key={"blank-" + n} className="pv-line pv-blank" data-line={n + 1} />
+  );
+  const codeIndexes = segments
+    .map((segment, index) => (segment.type === "code" ? index : -1))
+    .filter((index) => index >= 0);
+  function closedFence(line: number) {
+    return /^\s*(`{3,}|~{3,})\s*$/.test(sourceLine(line));
   }
+  const run = (
+    segment: Segment,
+    edit: (source: string, segments: Segment[], index: number) => TextEdit | null,
+    raw = source.slice(segment.start, segment.end),
+  ) => {
+    if (!applyEdit(file.content, { start: segment.start, raw }, edit))
+      notify?.("This lesson just changed. Try again.");
+  };
+  const rendered = segments.map((segment, index) => {
+    const key = segment.start;
+    const first = lineOf(segment.start),
+      last = lineOf(segment.end);
+    switch (segment.type) {
+      case "code": {
+        const position = codeIndexes.indexOf(index);
+        return (
+          <InlineCodeBlock
+            key={key}
+            segment={segment}
+            dark={dark}
+            firstLine={first + 1}
+            codeLines={closedFence(last) ? last - first - 1 : last - first}
+            closeLine={closedFence(last) ? last + 1 : undefined}
+            actions={
+              canEdit && (
+                <>
+                  <button
+                    className="icon-button"
+                    aria-label="Edit code block"
+                    title="Edit code block"
+                    onClick={() =>
+                      setEditing({
+                        segment,
+                        raw: source.slice(segment.start, segment.end),
+                      })
+                    }
+                  >
+                    <Pencil size={13} />
+                  </button>
+                  <button
+                    className="icon-button"
+                    aria-label="Move code block up"
+                    title="Move up"
+                    disabled={index === 0}
+                    onClick={() =>
+                      run(segment, (s, all, i) => moveSegment(s, all, i, -1))
+                    }
+                  >
+                    <ArrowUp size={13} />
+                  </button>
+                  <button
+                    className="icon-button"
+                    aria-label="Move code block down"
+                    title="Move down"
+                    disabled={index === segments.length - 1}
+                    onClick={() =>
+                      run(segment, (s, all, i) => moveSegment(s, all, i, 1))
+                    }
+                  >
+                    <ArrowDown size={13} />
+                  </button>
+                  <button
+                    className="icon-button"
+                    aria-label="Delete code block"
+                    title="Delete code block"
+                    onClick={() => {
+                      if (confirm("Delete this code block from the lesson?"))
+                        run(segment, (s, all, i) => deleteSegment(s, all[i]));
+                    }}
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                  <span className="sr-only">Code block {position + 1}</span>
+                </>
+              )
+            }
+          />
+        );
+      }
+      case "heading": {
+        const text = inline(segment.text);
+        const line = { className: "pv-line", "data-line": first + 1 };
+        return segment.level === 1 ? (
+          <h1 key={key} {...line}>{text}</h1>
+        ) : segment.level === 2 ? (
+          <h2 key={key} {...line}>{text}</h2>
+        ) : (
+          <h3 key={key} {...line}>{text}</h3>
+        );
+      }
+      case "hr":
+        return (
+          <div key={key} className="pv-line pv-hr" data-line={first + 1}>
+            <hr />
+          </div>
+        );
+      case "quote":
+        return (
+          <blockquote key={key}>
+            {range(first, last).map((n) => (
+              <span key={n} className="pv-line" data-line={n + 1}>
+                {inline(sourceLine(n).replace(/^\s*>\s?/, ""))}
+              </span>
+            ))}
+          </blockquote>
+        );
+      case "list": {
+        const items = segment.items.map((item, i) => (
+          <li key={i} className="pv-line" data-line={first + 1 + i}>
+            {inline(item)}
+          </li>
+        ));
+        return segment.ordered ? (
+          <ol key={key}>{items}</ol>
+        ) : (
+          <ul key={key}>{items}</ul>
+        );
+      }
+      default:
+        // Plain Text documents keep their prose literally; Markdown gets inline formatting.
+        return (
+          <p key={key}>
+            {range(first, last).map((n) => (
+              <span key={n} className="pv-line" data-line={n + 1}>
+                {plain ? sourceLine(n) : inline(sourceLine(n))}
+              </span>
+            ))}
+          </p>
+        );
+    }
+  });
+  // Interleave numbered blank lines so numbering matches the source exactly.
+  const output: ReactNode[] = [];
+  let next = 0;
+  segments.forEach((segment, index) => {
+    const first = lineOf(segment.start);
+    range(next, first - 1).forEach((n) => output.push(blank(n)));
+    output.push(rendered[index]);
+    next = lineOf(segment.end) + 1;
+  });
+  if (source) range(next, lineStarts.length - 1).forEach((n) => output.push(blank(n)));
   return (
     <article
-      className="markdown-preview"
+      className="markdown-preview numbered"
       aria-label="Markdown preview"
       style={{ fontSize }}
     >
@@ -226,6 +381,50 @@ export default function MarkdownPreview({
         output
       ) : (
         <p className="muted">Notes for this lesson will appear here.</p>
+      )}
+      {canEdit && (
+        <button
+          className="button secondary add-inline-block"
+          onClick={() => setEditing("new")}
+        >
+          <Plus size={15} /> Add code block
+        </button>
+      )}
+      {editing && (
+        <CodeBlockDialog
+          title={editing === "new" ? "Add code block" : "Edit code block"}
+          submitLabel={editing === "new" ? "Add code block" : "Save code block"}
+          initial={
+            editing === "new"
+              ? { language: "shell", content: "" }
+              : {
+                  language: languageId(editing.segment.language),
+                  content: editing.segment.content,
+                }
+          }
+          onClose={() => setEditing(null)}
+          onSave={({ language, content }) => {
+            // Keep the author's fence spelling (e.g. ```bash) when the language is unchanged.
+            const info =
+              editing !== "new" &&
+              languageId(editing.segment.language) === language
+                ? editing.segment.language
+                : language;
+            const block = fence(info, content);
+            if (editing === "new") {
+              const text = file.content,
+                current = text.toString(),
+                change = insertBlock(current, current.length, block);
+              text.insert(change.start, change.insert);
+            } else
+              run(
+                editing.segment,
+                (_s, all, i) => replaceSegment(all[i], block),
+                editing.raw,
+              );
+            setEditing(null);
+          }}
+        />
       )}
     </article>
   );

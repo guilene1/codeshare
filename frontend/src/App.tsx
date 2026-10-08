@@ -40,6 +40,10 @@ import {
   ArrowDown,
   Eye,
   ArrowLeft,
+  LogOut,
+  FolderInput,
+  PanelRight,
+  UserPlus,
 } from "lucide-react";
 import * as Y from "yjs";
 import { WebsocketProvider } from "y-websocket";
@@ -51,12 +55,24 @@ import CodeBlocks from "./components/CodeBlocks";
 import CreateWorkspace from "./components/CreateWorkspace";
 import WorkspaceDashboard from "./components/WorkspaceDashboard";
 import MarkdownPreview from "./components/MarkdownPreview";
-import { remember, shortcuts, forget } from "./workspaces";
+import CodeBlockDialog, { type BlockDraft } from "./components/CodeBlockDialog";
+import {
+  AccountPage,
+  ForgotPassword,
+  nextPath,
+  ResetPassword,
+  SignIn,
+  SignUp,
+} from "./components/AuthPages";
+import { AuthContext, loadSession, useAuth, type AuthState, type User } from "./auth";
+import { fence, insertBlock, isDocumentLanguage } from "./markdown";
+import { BRAND, Logo, LogoMark, TAGLINE } from "./brand";
 import CourseExplorer from "./components/CourseExplorer";
 import { ClassroomAwareness } from "./components/ClassroomAwareness";
 import {
   api,
-  createEditorCredential,
+  ApiError,
+  setCsrfToken,
   defaults,
   inferLanguage,
   initials,
@@ -73,7 +89,10 @@ type RoomInfo = {
   id: string;
   name: string;
   description?: string;
-  access?: "editor" | "viewer";
+  access?: "owner" | "editor" | "viewer";
+  owned?: boolean;
+  claimable?: boolean;
+  hasEditorLink?: boolean;
 };
 type Person = {
   id: number;
@@ -118,16 +137,6 @@ function LanguageSelect({
     </select>
   );
 }
-function Logo() {
-  return (
-    <span className="brand">
-      <span className="brand-icon">
-        <Code2 size={21} />
-      </span>
-      DevShare<span className="brand-dot">.</span>
-    </span>
-  );
-}
 
 export default function App() {
   const [dark, setDark] = useState(
@@ -135,6 +144,8 @@ export default function App() {
   );
   const [route, setRoute] = useState(location.pathname);
   const [toast, setToast] = useState("");
+  const [user, setUser] = useState<User | null>(null);
+  const [ready, setReady] = useState(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
   );
@@ -145,6 +156,10 @@ export default function App() {
   useEffect(() => {
     const listener = () => setRoute(location.pathname);
     window.addEventListener("popstate", listener);
+    loadSession()
+      .then(setUser)
+      .catch(() => setUser(null))
+      .finally(() => setReady(true));
     return () => window.removeEventListener("popstate", listener);
   }, []);
   const navigate = (path: string) => {
@@ -155,6 +170,24 @@ export default function App() {
     setToast(message);
     clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(""), 3500);
+  };
+  const auth: AuthState = {
+    user,
+    ready,
+    signedIn: (value, csrf) => {
+      setCsrfToken(csrf);
+      setUser(value);
+    },
+    update: setUser,
+    signOut: async () => {
+      try {
+        await api("/auth/signout", "POST", {});
+      } finally {
+        setCsrfToken(undefined);
+        setUser(null);
+        notify("Signed out");
+      }
+    },
   };
   const themeButton = (
     <button
@@ -168,50 +201,195 @@ export default function App() {
   );
   const roomRoute =
     /^\/(?:room|w)\/([\w-]{16})(?:\/edit\/([\w-]{43}))?\/?$/.exec(route);
+  const needsAccount = route === "/workspaces" || route === "/account";
+  useEffect(() => {
+    if (!ready) return;
+    if (needsAccount && !user)
+      navigate("/signin?next=" + encodeURIComponent(route + location.search));
+    else if (user && (route === "/" || route === "/signin" || route === "/signup"))
+      navigate(route === "/" ? "/workspaces" : nextPath());
+  }, [ready, user, route]);
+  let page: React.ReactNode;
+  if (!ready)
+    page = (
+      <div className="center-state">
+        <Logo />
+        <Loader2 size={28} className="spin" />
+      </div>
+    );
+  else if (roomRoute)
+    page = (
+      <Workspace
+        key={route}
+        id={roomRoute[1]}
+        editorToken={roomRoute[2]}
+        dark={dark}
+        themeButton={themeButton}
+        navigate={navigate}
+        notify={notify}
+      />
+    );
+  else if (route === "/signin") page = <SignIn navigate={navigate} notify={notify} />;
+  else if (route === "/signup") page = <SignUp navigate={navigate} notify={notify} />;
+  else if (route === "/forgot-password")
+    page = <ForgotPassword navigate={navigate} notify={notify} />;
+  else if (route === "/reset-password")
+    page = <ResetPassword navigate={navigate} notify={notify} />;
+  else
+    page = (
+      <Site
+        key={route}
+        route={route}
+        navigate={navigate}
+        themeButton={themeButton}
+        notify={notify}
+      />
+    );
   return (
-    <>
-      {roomRoute ? (
-        <Workspace
-          key={route}
-          id={roomRoute[1]}
-          editorToken={roomRoute[2]}
-          dark={dark}
-          themeButton={themeButton}
-          navigate={navigate}
-          notify={notify}
-        />
-      ) : (
-        <Landing
-          key={route}
-          dashboard={route === "/workspaces"}
-          navigate={navigate}
-          themeButton={themeButton}
-          notify={notify}
-        />
-      )}
+    <AuthContext.Provider value={auth}>
+      {page}
       {toast && (
         <div className="toast" role="status">
           <Check size={17} />
           {toast}
         </div>
       )}
-    </>
+    </AuthContext.Provider>
+  );
+}
+
+function SiteNav({
+  navigate,
+  themeButton,
+  onCreate,
+}: {
+  navigate: (p: string) => void;
+  themeButton: React.ReactNode;
+  onCreate: () => void;
+}) {
+  const { user, signOut } = useAuth();
+  const link = (path: string, label: React.ReactNode, className = "text-button") => (
+    <a
+      href={path}
+      className={className}
+      aria-current={location.pathname === path ? "page" : undefined}
+      onClick={(e) => {
+        e.preventDefault();
+        navigate(path);
+      }}
+    >
+      {label}
+    </a>
+  );
+  return (
+    <header className="landing-nav" aria-label="Main navigation">
+      <a
+        href="/"
+        aria-label={BRAND + " home"}
+        onClick={(e) => {
+          e.preventDefault();
+          navigate("/");
+        }}
+      >
+        <Logo />
+      </a>
+      <nav className="nav-right">
+        {user ? (
+          <>
+            {link("/workspaces", "My Workspaces")}
+            <button className="text-button nav-create" onClick={onCreate}>
+              <Plus size={15} /> Create Workspace
+            </button>
+            {link(
+              "/account",
+              <>
+                <span className="nav-avatar" aria-hidden="true">
+                  {initials(user.displayName)}
+                </span>
+                <span className="nav-account-name">{user.displayName}</span>
+              </>,
+              "text-button nav-account",
+            )}
+            <button
+              className="text-button"
+              onClick={async () => {
+                await signOut();
+                navigate("/");
+              }}
+            >
+              <LogOut size={15} /> Sign Out
+            </button>
+          </>
+        ) : (
+          <>
+            <span className="nav-caption">
+              Real-time coding, docs and collaboration.
+            </span>
+            {link("/signin", "Sign In")}
+            {link("/signup", "Sign Up", "button primary nav-signup")}
+          </>
+        )}
+        {themeButton}
+      </nav>
+    </header>
+  );
+}
+
+function Site({
+  route,
+  navigate,
+  themeButton,
+  notify,
+}: {
+  route: string;
+  navigate: (p: string) => void;
+  themeButton: React.ReactNode;
+  notify: (message: string) => void;
+}) {
+  const { user } = useAuth();
+  const [create, setCreate] = useState(
+    () => new URLSearchParams(location.search).get("create") === "1",
+  );
+  const startCreate = () =>
+    user
+      ? setCreate(true)
+      : navigate("/signup?next=" + encodeURIComponent("/workspaces?create=1"));
+  return (
+    <div className="landing">
+      <SiteNav navigate={navigate} themeButton={themeButton} onCreate={startCreate} />
+      {route === "/workspaces" && user ? (
+        <WorkspaceDashboard
+          key={user.id}
+          navigate={navigate}
+          onCreate={startCreate}
+          notify={notify}
+        />
+      ) : route === "/account" && user ? (
+        <AccountPage navigate={navigate} notify={notify} />
+      ) : (
+        <Landing navigate={navigate} onCreate={startCreate} />
+      )}
+      <footer className="landing-footer">
+        <span>Made for the way developers and teams build, document and share.</span>
+        <span>
+          {BRAND} · {TAGLINE}
+        </span>
+      </footer>
+      {create && user && (
+        <CreateWorkspace onClose={() => setCreate(false)} navigate={navigate} />
+      )}
+    </div>
   );
 }
 
 function Landing({
   navigate,
-  themeButton,
-  dashboard,
-  notify,
+  onCreate,
 }: {
   navigate: (p: string) => void;
-  themeButton: React.ReactNode;
-  dashboard: boolean;
-  notify: (message: string) => void;
+  onCreate: () => void;
 }) {
-  const [create, setCreate] = useState(false),
-    [code, setCode] = useState(""),
+  const [code, setCode] = useState(""),
     [error, setError] = useState("");
   function join(e: FormEvent) {
     e.preventDefault();
@@ -239,37 +417,12 @@ function Landing({
     navigate("/w/" + id);
   }
   return (
-    <div className="landing">
-      <header className="landing-nav">
-        <a href="/" aria-label="DevShare home">
-          <Logo />
-        </a>
-        <div className="nav-right">
-          <span className="nav-caption">
-            A workspace for technical instruction.
-          </span>
-          <button
-            className="text-button"
-            onClick={() => navigate("/workspaces")}
-          >
-            My Workspaces
-          </button>
-          {themeButton}
-        </div>
-      </header>
-      {dashboard ? (
-        <WorkspaceDashboard
-          navigate={navigate}
-          onCreate={() => setCreate(true)}
-          notify={notify}
-        />
-      ) : (
-        <>
+    <>
           <main className="landing-main">
             <section className="hero-copy">
               <div className="eyebrow">
                 <span className="live-dot" />
-                Your DevOps teaching workspace
+                {TAGLINE}
               </div>
               <h1>
                 Code together.
@@ -277,7 +430,7 @@ function Landing({
                 <span>Learn together.</span>
               </h1>
               <p className="hero-description">
-                A focused workspace for live coding, technical instruction, and
+                A focused workspace for live coding, technical documentation, and
                 real-time collaboration.
                 <br />
                 <br />
@@ -285,10 +438,7 @@ function Landing({
               </p>
               <button
                 className="button primary hero-button"
-                onClick={() => {
-                  setError("");
-                  setCreate(true);
-                }}
+                onClick={onCreate}
               >
                 <Plus size={19} />
                 Create Workspace
@@ -308,7 +458,7 @@ function Landing({
                     Open Workspace
                   </button>
                 </form>
-                {!create && error && (
+                {error && (
                   <p className="error" role="alert">
                     {error}
                   </p>
@@ -356,7 +506,7 @@ function Landing({
                 </div>
                 <pre>
                   <span className="syntax-comment">
-                    # Lesson 03 — S3 infrastructure
+                    # Step 03 — S3 infrastructure
                   </span>
                   {"\n\n"}
                   <span className="syntax-purple">resource</span>{" "}
@@ -369,7 +519,7 @@ function Landing({
                   {"\n\n  "}tags = {"{\n    "}Environment ={" "}
                   <span className="syntax-green">"dev"</span>
                   {"\n    "}Team ={" "}
-                  <span className="syntax-green">"cloud-class"</span>
+                  <span className="syntax-green">"cloud-team"</span>
                   <span className="demo-cursor">
                     <b>Alex</b>
                   </span>
@@ -390,8 +540,8 @@ function Landing({
                   <span style={{ background: "#aa6940" }}>ML</span>
                 </div>
                 <div>
-                  <strong>Instructor edits. Students follow live.</strong>
-                  <span>One lesson. Everyone on the same page.</span>
+                  <strong>One person edits. Everyone follows live.</strong>
+                  <span>One workspace. Everyone on the same page.</span>
                 </div>
               </div>
             </section>
@@ -401,7 +551,7 @@ function Landing({
               <Radio size={20} />
               <span>
                 <small className="feature-label">LIVE COLLABORATION</small>
-                <strong>Teach in real time</strong>
+                <strong>Collaborate in real time</strong>
                 <small>
                   Changes appear instantly across connected viewers.
                 </small>
@@ -418,30 +568,15 @@ function Landing({
             <div>
               <Layers size={20} />
               <span>
-                <small className="feature-label">STRUCTURED LEARNING</small>
-                <strong>Organize as you teach</strong>
+                <small className="feature-label">STRUCTURED KNOWLEDGE</small>
+                <strong>Organize as you build</strong>
                 <small>
-                  Keep lessons, files and reusable snippets together.
+                  Keep docs, files and copyable code blocks together.
                 </small>
               </span>
             </div>
           </section>
-          <WorkspaceDashboard
-            compact
-            navigate={navigate}
-            onCreate={() => setCreate(true)}
-            notify={notify}
-          />
-        </>
-      )}
-      <footer className="landing-footer">
-        <span>Made for the way developers teach and learn.</span>
-        <span>Write. Share. Build together.</span>
-      </footer>
-      {create && (
-        <CreateWorkspace onClose={() => setCreate(false)} navigate={navigate} />
-      )}
-    </div>
+    </>
   );
 }
 
@@ -460,16 +595,21 @@ function Workspace({
   navigate: (p: string) => void;
   notify: (s: string) => void;
 }) {
-  const previousShortcut = editorToken
-    ? shortcuts().find((item) => item.id === id && item.token === editorToken)
-    : undefined;
+  const { user } = useAuth();
   const [room, setRoom] = useState<RoomInfo | null>(null),
+    // The private editor link in use; cleared if the server reports it revoked.
+    [credential, setCredential] = useState(editorToken),
     [error, setError] = useState(""),
     [name, setName] = useState(() =>
-      editorToken ? readLocal<string>("devshare.name." + id, "") : "",
+      user
+        ? user.displayName
+        : editorToken
+          ? readLocal<string>("devshare.name." + id, "")
+          : "",
     ),
+    // Only anonymous co-editors (private link, no account) are asked for a name.
     [joining, setJoining] = useState(
-      !!editorToken && !readLocal("devshare.name." + id, ""),
+      !user && !!editorToken && !readLocal("devshare.name." + id, ""),
     ),
     [provider, setProvider] = useState<WebsocketProvider | null>(null),
     [files, setFiles] = useState<FileDoc[]>([]),
@@ -484,11 +624,19 @@ function Workspace({
         ? "blocks"
         : "editor",
     ),
-    [markdownMode, setMarkdownMode] = useState<"edit" | "preview">("edit"),
-    [selectionDraft, setSelectionDraft] = useState<Pick<
-      CodeBlock,
-      "title" | "language" | "content"
-    > | null>(null),
+    [markdownMode, setMarkdownMode] = useState<"edit" | "split" | "preview">(
+      "edit",
+    ),
+    [blockDialog, setBlockDialog] = useState<
+      (BlockDraft & { mode: "insert" | "selection" | "lesson" }) | null
+    >(null),
+    [migrated, setMigrated] = useState(false),
+    [migrating, setMigrating] = useState(false),
+    [claiming, setClaiming] = useState(false),
+    // Open file tabs for this lesson (personal to this browser; never shared).
+    [openTabs, setOpenTabs] = useState<string[]>([]),
+    // A file to open once it arrives (it may sync before or after the REST reply).
+    [pendingOpen, setPendingOpen] = useState<string | null>(null),
     [active, setActive] = useState(""),
     [people, setPeople] = useState<Person[]>([]),
     [viewerCount, setViewerCount] = useState(0),
@@ -518,47 +666,203 @@ function Workspace({
     [position, setPosition] = useState({ line: 1, col: 1 });
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
   const pendingFile = useRef<string | null>(
-    new URLSearchParams(location.search).get("file") ??
-      ((previousShortcut?.folder ?? null) === folder
-        ? (previousShortcut?.file ?? null)
-        : null),
+    new URLSearchParams(location.search).get("file"),
   );
+  const tabsFor = useRef<string | null>(null);
   const pasteTarget = useRef<{
     editor: editor.IStandaloneCodeEditor;
     model: editor.ITextModel;
   } | null>(null);
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
-  const current = files.find((f) => f.id === active) ?? files[0];
-  const isEditor = room?.access === "editor";
+  const current = openTabs.includes(active)
+    ? files.find((f) => f.id === active)
+    : undefined;
+  const isOwner = room?.access === "owner";
+  const isEditor = isOwner || room?.access === "editor";
+  // Owners manage the workspace; unclaimed v1 workspaces keep link-based management.
+  const canManage = isOwner || (isEditor && !room?.owned);
+  const tabsKey = `devshare.tabs.${id}.${folder ?? "root"}`;
+  const openTab = (fileId: string) => setPendingOpen(fileId);
   useEffect(() => {
-    if (isEditor && editorToken && room)
-      remember({
-        id,
-        token: editorToken,
-        name: room.name,
-        description: room.description ?? "",
-        lastOpened: Date.now(),
-        folder,
-        file: current?.id,
-        view: workspaceView,
-      });
-  }, [
-    isEditor,
-    editorToken,
-    room?.name,
-    room?.description,
-    folder,
-    current?.id,
-    workspaceView,
-  ]);
+    if (!pendingOpen || !files.some((file) => file.id === pendingOpen)) return;
+    setOpenTabs((tabs) =>
+      tabs.includes(pendingOpen) ? tabs : [...tabs, pendingOpen],
+    );
+    setActive(pendingOpen);
+    setWorkspaceView("editor");
+    setPendingOpen(null);
+  }, [files, pendingOpen]);
+  // Closing a tab only hides it locally; shared file content is untouched.
+  function closeTab(fileId: string) {
+    const index = openTabs.indexOf(fileId);
+    if (index < 0) return;
+    const remaining = openTabs.filter((tab) => tab !== fileId);
+    setOpenTabs(remaining);
+    if (active === fileId)
+      setActive(remaining[Math.min(index, remaining.length - 1)] ?? "");
+  }
   useEffect(() => {
-    setMarkdownMode(isEditor ? "edit" : "preview");
+    if (!synced) return;
+    const exists = (fileId: string) => files.some((file) => file.id === fileId);
+    if (tabsFor.current !== tabsKey) {
+      // First sync of this lesson: restore remembered tabs, or open the first file.
+      tabsFor.current = tabsKey;
+      const saved = readLocal<{ tabs?: unknown; active?: unknown }>(tabsKey, {});
+      const remembered = Array.isArray(saved.tabs)
+        ? saved.tabs.filter(
+            (tab): tab is string => typeof tab === "string" && exists(tab),
+          )
+        : null;
+      const next = [
+        ...new Set([
+          ...(remembered ?? (files[0] ? [files[0].id] : [])),
+          ...openTabs.filter(exists),
+        ]),
+      ];
+      setOpenTabs(next);
+      setActive(
+        next.includes(active)
+          ? active
+          : typeof saved.active === "string" && next.includes(saved.active)
+            ? saved.active
+            : (next[0] ?? ""),
+      );
+      return;
+    }
+    // Files deleted by the instructor disappear from everyone's tabs.
+    const pending = pendingFile.current;
+    if (openTabs.some((tab) => !exists(tab) && tab !== pending)) {
+      const kept = openTabs.filter((tab) => exists(tab) || tab === pending);
+      setOpenTabs(kept);
+      if (!kept.includes(active)) setActive(kept[0] ?? "");
+    }
+  }, [files, synced, tabsKey]);
+  useEffect(() => {
+    if (tabsFor.current === tabsKey)
+      storeLocal(tabsKey, { tabs: openTabs, active });
+  }, [openTabs, active, tabsKey]);
+  // My Workspaces reopens the lesson this browser last used (a folder ID, not a secret).
+  useEffect(() => {
+    if (isEditor) storeLocal("devshare.lastLesson." + id, folder);
+  }, [isEditor, id, folder]);
+  useEffect(() => {
+    setMarkdownMode(
+      isEditor ? (window.innerWidth > 1100 ? "split" : "edit") : "preview",
+    );
   }, [current?.id, isEditor]);
   function createBlockFromSelection(content: string, language: string) {
     if (!isEditor || !content) return;
-    setSelectionDraft({ title: "", language, content });
-    setWorkspaceView("blocks");
+    setBlockDialog({
+      mode: isDocumentLanguage(current?.language) ? "selection" : "lesson",
+      language: isDocumentLanguage(current?.language) ? "shell" : language,
+      content,
+    });
+  }
+  // Inserts a fenced block at the Monaco cursor (or replaces the selection).
+  function insertAtCursor(block: string, replaceSelection: boolean) {
+    const target = editorRef.current,
+      model = target?.getModel(),
+      selection = target?.getSelection();
+    if (!target || !model || !selection || !current) return false;
+    const offset = model.getOffsetAt(selection.getStartPosition());
+    const end = replaceSelection
+      ? model.getOffsetAt(selection.getEndPosition())
+      : offset;
+    const source = model.getValue();
+    const change = insertBlock(
+      source.slice(0, offset) + source.slice(end),
+      offset,
+      block,
+    );
+    target.executeEdits("devshare-block", [
+      {
+        range: replaceSelection
+          ? selection
+          : {
+              startLineNumber: selection.startLineNumber,
+              startColumn: selection.startColumn,
+              endLineNumber: selection.startLineNumber,
+              endColumn: selection.startColumn,
+            },
+        text: change.insert,
+        forceMoveMarkers: true,
+      },
+    ]);
+    target.focus();
+    return true;
+  }
+  async function saveBlock(draft: BlockDraft) {
+    if (!blockDialog) return;
+    const block = fence(draft.language, draft.content);
+    try {
+      if (blockDialog.mode === "lesson") {
+        if (draft.target && draft.target !== "new") {
+          const lesson = files.find((file) => file.id === draft.target);
+          if (!lesson) throw new Error("That lesson document is no longer available.");
+          const text = lesson.content.toString();
+          lesson.content.insert(
+            text.length,
+            insertBlock(text, text.length, block).insert,
+          );
+          openTab(lesson.id);
+        } else {
+          let filename = "lesson.md";
+          for (let n = 2; files.some((file) => file.filename === filename); n++)
+            filename = `lesson-${n}.md`;
+          const result = await roomApi<{ id: string }>(
+            "/rooms/" + id + "/documents",
+            "POST",
+            { filename, language: "markdown", content: block + "\n" },
+          );
+          openTab(result.id);
+        }
+        notify("Code block added to the lesson");
+      } else if (
+        markdownMode === "preview" ||
+        !insertAtCursor(block, blockDialog.mode === "selection")
+      ) {
+        const text = current!.content.toString();
+        current!.content.insert(
+          text.length,
+          insertBlock(text, text.length, block).insert,
+        );
+      }
+      setBlockDialog(null);
+    } catch (e) {
+      notify((e as Error).message);
+    }
+  }
+  async function migrate() {
+    setMigrating(true);
+    try {
+      const result = await roomApi<{ migrated: number; file: string | null }>(
+        "/rooms/" + id + "/migrate-snippets",
+        "POST",
+      );
+      if (result.file) openTab(result.file);
+      notify(
+        result.migrated
+          ? `${result.migrated} snippets moved into code-blocks.md`
+          : "These snippets were already moved",
+      );
+    } catch (e) {
+      notify((e as Error).message);
+    } finally {
+      setMigrating(false);
+    }
+  }
+  async function claim() {
+    setClaiming(true);
+    try {
+      await api("/rooms/" + id + "/claim", "POST", {}, credential);
+      notify("Workspace added to your account");
+      // Reopen without the private token in the address bar.
+      navigate("/w/" + id + location.search);
+    } catch (e) {
+      notify((e as Error).message);
+      setClaiming(false);
+    }
   }
   async function returnToWorkspaces() {
     if (isEditor && provider?.synced) {
@@ -569,7 +873,7 @@ function Workspace({
         return;
       }
     }
-    navigate("/workspaces");
+    navigate(user ? "/workspaces" : "/");
   }
   const roomApi = <T = { ok: boolean },>(
     path: string,
@@ -585,16 +889,17 @@ function Workspace({
           : ""),
       method,
       body,
-      editorToken,
+      credential,
     );
   function openLesson(next: string | null, file?: string) {
     setError("");
     if (next === folder) {
-      if (file) setActive(file);
+      if (file) openTab(file);
       return;
     }
     pendingFile.current = file ?? null;
     setActive("");
+    setOpenTabs([]);
     setFiles([]);
     setBlocks([]);
     setSynced(false);
@@ -613,20 +918,27 @@ function Workspace({
         if (!canceled) setRoom(r);
       })
       .catch((e) => {
-        if (!canceled) setError(e.message);
+        if (canceled) return;
+        // A revoked or replaced editor link still opens the workspace view-only.
+        if (credential && e instanceof ApiError && e.status === 403) {
+          setCredential(undefined);
+          setJoining(false);
+          notify("This editor link is no longer valid. Opening view-only.");
+        } else setError(e.message);
       });
     return () => {
       canceled = true;
     };
-  }, [id, editorToken]);
+  }, [id, credential]);
   useEffect(() => {
-    api<CourseTree>("/rooms/" + id + "/tree", "GET", undefined, editorToken)
+    if (!room) return;
+    api<CourseTree>("/rooms/" + id + "/tree", "GET", undefined, credential)
       .then((value) => {
         setTree(value);
         setTreeReady(true);
       })
       .catch((e) => setError(e.message));
-  }, [id, editorToken]);
+  }, [id, credential, room?.access]);
   useEffect(() => {
     if (
       treeReady &&
@@ -646,15 +958,16 @@ function Workspace({
         connect: false,
         disableBc: true,
         params: folder ? { folder } : {},
+        // Owners authenticate with the session cookie; link editors with the link.
         protocols:
-          isEditor && editorToken
-            ? ["devshare", "editor." + editorToken]
+          room.access === "editor" && credential
+            ? ["devshare", "editor." + credential]
             : ["devshare"],
       });
     let checkpoint: ReturnType<typeof setTimeout> | undefined;
     if (isEditor)
       p.awareness.setLocalStateField("user", {
-        name: name.trim().slice(0, 40),
+        name: (user?.displayName ?? name).trim().slice(0, 40),
         color: colors[p.doc.clientID % colors.length],
       });
     else p.awareness.setLocalState({ viewer: true });
@@ -673,13 +986,13 @@ function Workspace({
       });
       result.sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
       setFiles(result);
-      if (
-        pendingFile.current &&
-        result.some((file) => file.id === pendingFile.current)
-      ) {
-        setActive(pendingFile.current);
+      const pending = pendingFile.current;
+      if (pending && result.some((file) => file.id === pending)) {
+        setOpenTabs((tabs) => (tabs.includes(pending) ? tabs : [...tabs, pending]));
+        setActive(pending);
         pendingFile.current = null;
       }
+      setMigrated(!!doc.getMap("migrations").get("snippetsToMarkdown"));
       const catalog = doc.getMap("catalog").get("tree") as
         | CourseTree
         | undefined;
@@ -760,7 +1073,7 @@ function Workspace({
             "The server rejected this change. Refresh to reconnect.",
         );
         p.shouldConnect = false;
-        api<CourseTree>("/rooms/" + id + "/tree", "GET", undefined, editorToken)
+        api<CourseTree>("/rooms/" + id + "/tree", "GET", undefined, credential)
           .then((value) => {
             setTree(value);
             setTreeReady(true);
@@ -800,12 +1113,9 @@ function Workspace({
       p.destroy();
       doc.destroy();
     };
-  }, [room?.id, room?.access, joining, editorToken, folder]);
+  }, [room?.id, room?.access, joining, credential, folder]);
   useEffect(() => {
-    if (current) {
-      setActive(current.id);
-      provider?.awareness.setLocalStateField("fileId", current.id);
-    }
+    if (current) provider?.awareness.setLocalStateField("fileId", current.id);
   }, [current?.id, provider]);
   useEffect(() => {
     if (!provider) return;
@@ -851,10 +1161,17 @@ function Workspace({
         e.preventDefault();
         setDialog("settings");
       }
+      // Ctrl+W belongs to the browser, so Alt+W closes the active tab.
+      if (e.altKey && !e.ctrlKey && !e.metaKey && e.key.toLowerCase() === "w") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (current) closeTab(current.id);
+      }
     };
-    window.addEventListener("keydown", keys);
-    return () => window.removeEventListener("keydown", keys);
-  }, [id, provider, isEditor, editorToken]);
+    // Capture phase: Monaco consumes Alt+W (find whole word) before bubbling.
+    window.addEventListener("keydown", keys, true);
+    return () => window.removeEventListener("keydown", keys, true);
+  }, [id, provider, isEditor, credential, current?.id, openTabs]);
   async function copy(value: string, label: string) {
     try {
       await navigator.clipboard.writeText(value);
@@ -925,7 +1242,7 @@ function Workspace({
           "POST",
           { filename, language: fileLang },
         );
-        setActive(result.id);
+        openTab(result.id);
       } else if (current)
         await roomApi("/rooms/" + id + "/documents/" + current.id, "PATCH", {
           filename,
@@ -1019,14 +1336,14 @@ function Workspace({
   return (
     <div className="workspace">
       <header className="workspace-nav">
-        {isEditor && (
+        {(isEditor || user) && (
           <button
             className="workspace-back text-button"
             onClick={() => void returnToWorkspaces()}
-            title="My Workspaces"
+            title={user ? "My Workspaces" : "Home"}
           >
             <ArrowLeft size={16} />
-            <span>My Workspaces</span>
+            <span>{user ? "My Workspaces" : "Home"}</span>
           </button>
         )}
         <span className="workspace-brand">
@@ -1092,6 +1409,39 @@ function Workspace({
           {themeButton}
         </div>
       </header>
+      {room.claimable && (
+        <div className="claim-banner" role="region" aria-label="Claim workspace">
+          <UserPlus size={17} />
+          <span>
+            This workspace isn’t linked to an account yet.{" "}
+            {user
+              ? "Add it to your account to open it from any device. Its editor link keeps working."
+              : "Sign in to add it to your account and open it from any device."}
+          </span>
+          {user ? (
+            <button
+              className="button primary"
+              disabled={claiming}
+              onClick={() => void claim()}
+            >
+              {claiming && <Loader2 size={15} className="spin" />} Add to my
+              account
+            </button>
+          ) : (
+            <button
+              className="button secondary"
+              onClick={() =>
+                navigate(
+                  "/signin?next=" +
+                    encodeURIComponent(location.pathname + location.search),
+                )
+              }
+            >
+              Sign in
+            </button>
+          )}
+        </div>
+      )}
       <div className="workspace-body">
         {sidebar && (
           <aside className="sidebar">
@@ -1191,20 +1541,43 @@ function Workspace({
             >
               <FileCode2 size={15} /> Files & Editor
             </button>
-            <button
-              className={workspaceView === "blocks" ? "active" : ""}
-              aria-pressed={workspaceView === "blocks"}
-              onClick={() => setWorkspaceView("blocks")}
-            >
-              <Code2 size={16} /> Code Blocks <span>{blocks.length}</span>
-            </button>
+            {!!blocks.length && !migrated && (
+              <button
+                className={workspaceView === "blocks" ? "active" : ""}
+                aria-pressed={workspaceView === "blocks"}
+                onClick={() => setWorkspaceView("blocks")}
+              >
+                <Code2 size={16} /> Legacy snippets <span>{blocks.length}</span>
+              </button>
+            )}
           </div>
-          {workspaceView === "blocks" ? (
+          {workspaceView === "blocks" && blocks.length && !migrated ? (
+            <div className="legacy-snippets">
+              <div className="migrate-banner">
+                <FolderInput size={18} />
+                <span>
+                  Code blocks now live inside Markdown lesson documents, next to
+                  your explanations.
+                  {isEditor
+                    ? " Move these snippets into a new code-blocks.md lesson. The originals are kept safely."
+                    : " Your instructor can move these snippets into a lesson."}
+                </span>
+                {isEditor && (
+                  <button
+                    className="button primary"
+                    disabled={!connected || migrating}
+                    onClick={() => void migrate()}
+                  >
+                    {migrating && <Loader2 size={15} className="spin" />} Move
+                    snippets into a lesson document
+                  </button>
+                )}
+              </div>
             <CodeBlocks
-              initialDraft={selectionDraft}
-              onDraftConsumed={() => setSelectionDraft(null)}
+              initialDraft={null}
+              onDraftConsumed={() => {}}
               blocks={blocks}
-              canEdit={isEditor}
+              canEdit={false}
               connected={connected}
               dark={dark}
               fontSize={settings.fontSize}
@@ -1221,25 +1594,51 @@ function Workspace({
                 roomApi("/rooms/" + id + "/blocks/order", "PATCH", { ids })
               }
             />
+            </div>
           ) : (
             <>
               <div className="tab-bar">
-                <div className="tabs" role="tablist" aria-label="Files">
-                  {files.map((f) => (
-                    <button
-                      role="tab"
-                      aria-selected={current?.id === f.id}
-                      key={f.id}
-                      className={
-                        "file-tab " + (current?.id === f.id ? "active" : "")
-                      }
-                      onClick={() => setActive(f.id)}
-                    >
-                      <FileCode2 size={15} />
-                      {f.filename}
-                      <span className="tab-dot" />
-                    </button>
-                  ))}
+                <div className="tabs" role="tablist" aria-label="Open files">
+                  {openTabs.map((tabId) => {
+                    const f = files.find((file) => file.id === tabId);
+                    if (!f) return null;
+                    return (
+                      <div
+                        role="tab"
+                        tabIndex={0}
+                        aria-label={f.filename}
+                        aria-selected={current?.id === f.id}
+                        key={f.id}
+                        className={
+                          "file-tab " + (current?.id === f.id ? "active" : "")
+                        }
+                        onClick={() => setActive(f.id)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") setActive(f.id);
+                        }}
+                        onAuxClick={(e) => {
+                          if (e.button === 1) {
+                            e.preventDefault();
+                            closeTab(f.id);
+                          }
+                        }}
+                      >
+                        <FileCode2 size={15} />
+                        {f.filename}
+                        <button
+                          className="tab-close"
+                          aria-label={"Close " + f.filename}
+                          title="Close (Alt+W)"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            closeTab(f.id);
+                          }}
+                        >
+                          <X size={13} />
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
                 {isEditor && (
                   <button
@@ -1257,23 +1656,51 @@ function Workspace({
                 <span>{room.name}</span>
                 <ChevronRight size={12} />
                 <FileCode2 size={13} />
-                <span>{current?.filename ?? "Connecting…"}</span>
+                <span>
+                  {current?.filename ??
+                    (connected ? "No file open" : "Connecting…")}
+                </span>
                 <div className="editor-actions">
-                  {current?.language === "markdown" && (
-                    <div className="markdown-switch" aria-label="Markdown view">
-                      <button
-                        aria-pressed={markdownMode === "edit"}
-                        onClick={() => setMarkdownMode("edit")}
-                      >
-                        {isEditor ? "Edit" : "Source"}
-                      </button>
-                      <button
-                        aria-pressed={markdownMode === "preview"}
-                        onClick={() => setMarkdownMode("preview")}
-                      >
-                        Preview
-                      </button>
-                    </div>
+                  {isDocumentLanguage(current?.language) && (
+                    <>
+                      {isEditor && (
+                        <button
+                          className="text-button insert-block-button"
+                          disabled={!connected}
+                          onClick={() =>
+                            setBlockDialog({
+                              mode: "insert",
+                              language: "shell",
+                              content: "",
+                            })
+                          }
+                        >
+                          <Code2 size={14} /> Insert Code Block
+                        </button>
+                      )}
+                      <div className="markdown-switch" aria-label="Markdown view">
+                        <button
+                          aria-pressed={markdownMode === "edit"}
+                          onClick={() => setMarkdownMode("edit")}
+                        >
+                          {isEditor ? "Edit" : "Source"}
+                        </button>
+                        {isEditor && (
+                          <button
+                            aria-pressed={markdownMode === "split"}
+                            onClick={() => setMarkdownMode("split")}
+                          >
+                            <PanelRight size={13} /> Split
+                          </button>
+                        )}
+                        <button
+                          aria-pressed={markdownMode === "preview"}
+                          onClick={() => setMarkdownMode("preview")}
+                        >
+                          Preview
+                        </button>
+                      </div>
+                    </>
                   )}
                   {isEditor && (
                     <>
@@ -1305,7 +1732,7 @@ function Workspace({
                   )}
                   <button
                     className="icon-button"
-                    aria-label="Copy code"
+                    aria-label="Copy file"
                     title="Copy all code in this file"
                     disabled={!current}
                     onClick={() =>
@@ -1396,16 +1823,26 @@ function Workspace({
                       : "Reconnecting… Live updates will resume when the connection returns."}
                 </div>
               )}
-              <div className="editor-surface">
+              <div
+                className={
+                  "editor-surface" +
+                  (isDocumentLanguage(current?.language) && markdownMode === "split"
+                    ? " split"
+                    : "")
+                }
+              >
                 {provider &&
                 current &&
-                current.language === "markdown" &&
+                isDocumentLanguage(current.language) &&
                 markdownMode === "preview" ? (
                   <MarkdownPreview
                     key={current.id}
                     file={current}
                     dark={dark}
                     fontSize={settings.fontSize}
+                    canEdit={isEditor && connected}
+                    plain={current.language === "plaintext"}
+                    notify={notify}
                   />
                 ) : provider && current ? (
                   <Suspense
@@ -1428,10 +1865,38 @@ function Workspace({
                         editorRef.current = e;
                       }}
                     />
+                    {isDocumentLanguage(current.language) &&
+                      markdownMode === "split" && (
+                        <MarkdownPreview
+                          key={"preview-" + current.id}
+                          file={current}
+                          dark={dark}
+                          fontSize={settings.fontSize}
+                          canEdit={isEditor && connected}
+                          plain={current.language === "plaintext"}
+                          notify={notify}
+                        />
+                      )}
                   </Suspense>
                 ) : (
                   <div className="editor-loading">
-                    {connected ? (
+                    {connected && files.length ? (
+                      <div className="empty-lesson">
+                        <FileCode2 size={30} />
+                        <p>No files are open.</p>
+                        <p className="muted">
+                          Open a file from the Explorer to view it here.
+                        </p>
+                        {!sidebar && (
+                          <button
+                            className="button secondary"
+                            onClick={() => setSidebar(true)}
+                          >
+                            <PanelLeft size={16} /> Show Explorer
+                          </button>
+                        )}
+                      </div>
+                    ) : connected ? (
                       <div className="empty-lesson">
                         <FileCode2 size={30} />
                         <p>
@@ -1464,8 +1929,8 @@ function Workspace({
       <footer className="status-bar">
         <div>
           <span className="status-brand">
-            <Code2 size={14} />
-            DevShare
+            <LogoMark size={15} />
+            {BRAND}
           </span>
           <span>
             {connected ? <Wifi size={13} /> : <WifiOff size={13} />}{" "}
@@ -1581,19 +2046,25 @@ function Workspace({
           folderId={folder}
           id={id}
           name={room.name}
-          editorToken={isEditor ? editorToken : undefined}
+          editorToken={room.access === "editor" ? credential : undefined}
+          owner={isOwner}
+          hasEditorLink={room.hasEditorLink}
           copy={copy}
+          onLinkChange={(exists) =>
+            setRoom((previous) =>
+              previous ? { ...previous, hasEditorLink: exists } : previous,
+            )
+          }
           onClose={() => setDialog(null)}
         />
       )}
       {dialog === "settings" && (
         <SettingsPanel
           onDelete={
-            isEditor
+            canManage
               ? async () => {
                   await roomApi("/rooms/" + id, "DELETE");
-                  forget(id);
-                  navigate("/workspaces");
+                  navigate(user ? "/workspaces" : "/");
                   notify("Workspace permanently deleted");
                 }
               : undefined
@@ -1602,7 +2073,7 @@ function Workspace({
           canEdit={isEditor}
           workspaceName={room.name}
           onRename={
-            isEditor
+            canManage
               ? async (value) => {
                   await roomApi("/rooms/" + id, "PATCH", { name: value });
                   notify("Workspace name updated");
@@ -1691,6 +2162,28 @@ function Workspace({
           </div>
         </Modal>
       )}
+      {blockDialog && (
+        <CodeBlockDialog
+          title={
+            blockDialog.mode === "lesson"
+              ? "Add selection to a lesson"
+              : blockDialog.mode === "selection"
+                ? "Create code block from selection"
+                : "Insert Code Block"
+          }
+          submitLabel={
+            blockDialog.mode === "lesson" ? "Add to lesson" : "Insert Code Block"
+          }
+          initial={blockDialog}
+          targets={
+            blockDialog.mode === "lesson"
+              ? files.filter((file) => isDocumentLanguage(file.language))
+              : undefined
+          }
+          onSave={(draft) => void saveBlock(draft)}
+          onClose={() => setBlockDialog(null)}
+        />
+      )}
       {dialog === "shortcuts" && (
         <Modal title="A few useful shortcuts" onClose={() => setDialog(null)}>
           <div className="shortcut-list">
@@ -1709,6 +2202,7 @@ function Workspace({
                 "Ctrl / ⌘ Shift P",
               ],
               [isEditor ? "Copy / paste" : "Copy", "Ctrl / ⌘ C / V"],
+              ["Close file tab", "Alt W / middle-click"],
             ].map(([label, key]) => (
               <div key={label}>
                 <span>{label}</span>

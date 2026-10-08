@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { writeFile } from "node:fs/promises";
 import * as Y from "yjs";
@@ -34,8 +34,10 @@ assert.ok(
   settleMs >= 31000,
   "Allow at least 31 seconds to verify idle eviction",
 );
-const token = randomBytes(32).toString("base64url"),
-  hash = createHash("sha256").update(token).digest("hex");
+// v2: workspaces belong to accounts. Use DEVSHARE_EMAIL/DEVSHARE_PASSWORD for an existing
+// operator account (production), otherwise a throwaway account is created (local runs).
+// The instructor client edits through a private co-editor link, as a co-teacher would.
+let token, owner;
 const clients = new Set();
 // y-websocket registers one process-exit handler per provider and removes it on destroy.
 // Deliberately independent clients legitimately exceed Node's default listener warning threshold.
@@ -59,10 +61,36 @@ async function request(path, method = "GET", body, editor = true) {
     headers: {
       origin,
       "content-type": "application/json",
-      ...(editor ? { Authorization: "Bearer " + token } : {}),
+      ...(editor === "owner"
+        ? owner
+        : editor
+          ? { Authorization: "Bearer " + token }
+          : {}),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+}
+async function signIn() {
+  const existing = process.env.DEVSHARE_EMAIL;
+  const password =
+    process.env.DEVSHARE_PASSWORD ?? randomBytes(18).toString("base64url") + "-Lt9";
+  const response = await request(
+    existing ? "/auth/signin" : "/auth/signup",
+    "POST",
+    {
+      email: existing ?? `load-test-${Date.now()}@example.test`,
+      password,
+      confirmPassword: password,
+      displayName: "Load test",
+    },
+    false,
+  );
+  const body = await response.text();
+  assert.ok(response.ok, "Load-test sign-in failed: " + body);
+  owner = {
+    cookie: response.headers.get("set-cookie").split(";")[0],
+    "x-csrf-token": JSON.parse(body).csrfToken,
+  };
 }
 async function metrics() {
   if (!process.env.METRICS_TOKEN) return null;
@@ -112,13 +140,18 @@ function destroy(provider) {
 let report;
 try {
   const baseline = await metrics();
-  const created = await request("/rooms", "POST", {
-    name: `Temporary ${viewers}-viewer load test`,
-    language: "hcl",
-    editorTokenHash: hash,
-  });
+  await signIn();
+  const created = await request(
+    "/rooms",
+    "POST",
+    { name: `Temporary ${viewers}-viewer load test`, language: "hcl" },
+    "owner",
+  );
   assert.equal(created.status, 201);
   roomId = (await created.json()).id;
+  const link = await request(`/rooms/${roomId}/editor-link`, "POST", {}, "owner");
+  assert.equal(link.status, 201);
+  token = (await link.json()).token;
   const folder = await request(`/rooms/${roomId}/folders`, "POST", {
     name: "Active Terraform lesson",
   });
@@ -351,7 +384,7 @@ try {
   for (const provider of [...clients]) destroy(provider);
   if (roomId)
     assert.equal(
-      (await request(`/rooms/${roomId}`, "DELETE")).status,
+      (await request(`/rooms/${roomId}`, "DELETE", undefined, "owner")).status,
       200,
       "Remove only the test workspace",
     );

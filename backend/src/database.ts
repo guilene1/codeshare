@@ -57,5 +57,32 @@ export function openDatabase(path: string) {
   db.exec(
     "CREATE INDEX IF NOT EXISTS documents_course ON documents(room_id, folder_id, position)",
   );
+  // v2 accounts: additive tables. Secrets are stored only as hashes.
+  db.exec(`CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      display_name TEXT NOT NULL, password_hash TEXT NOT NULL,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+      password_changed_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS sessions (
+      token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id);
+    CREATE TABLE IF NOT EXISTS password_resets (
+      token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, used_at INTEGER
+    );`);
+  // Legacy workspaces keep owner_id NULL until claimed with their editor link.
+  if (
+    !db
+      .prepare("PRAGMA table_info(rooms)")
+      .all()
+      .some((column) => column.name === "owner_id")
+  )
+    db.exec("ALTER TABLE rooms ADD COLUMN owner_id TEXT REFERENCES users(id)");
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS rooms_owner ON rooms(owner_id, updated_at DESC)",
+  );
   return db;
 }

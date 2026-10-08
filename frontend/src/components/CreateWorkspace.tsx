@@ -1,8 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { Loader2, Plus } from "lucide-react";
 import Modal from "./Modal";
-import { api, createEditorCredential, storeLocal } from "../lib";
-import { remember } from "../workspaces";
+import { api } from "../lib";
 export default function CreateWorkspace({
   onClose,
   navigate,
@@ -12,7 +11,6 @@ export default function CreateWorkspace({
 }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [person, setPerson] = useState("");
   const [template, setTemplate] = useState("terraform");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -21,21 +19,13 @@ export default function CreateWorkspace({
     setBusy(true);
     setError("");
     try {
-      const credential = await createEditorCredential();
+      // The workspace belongs to the signed-in account; no credential goes in the URL.
       const item = await api<{ id: string; name: string }>("/rooms", "POST", {
         name: name.trim(),
         description,
         template,
-        editorTokenHash: credential.hash,
       });
-      storeLocal("devshare.name." + item.id, person.trim());
-      remember({
-        ...item,
-        description: description.trim(),
-        token: credential.token,
-        lastOpened: Date.now(),
-      });
-      navigate(`/w/${item.id}/edit/${credential.token}`);
+      navigate(`/w/${item.id}`);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -72,16 +62,6 @@ export default function CreateWorkspace({
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             placeholder="AWS infrastructure with Terraform"
-          />
-        </label>
-        <label className="field">
-          Your name
-          <input
-            required
-            maxLength={40}
-            value={person}
-            onChange={(e) => setPerson(e.target.value)}
-            placeholder="How students will see you"
           />
         </label>
         <fieldset className="template-options">
@@ -128,15 +108,15 @@ export default function CreateWorkspace({
           </button>
           <button
             className="button primary"
-            disabled={busy || !name.trim() || !person.trim()}
+            disabled={busy || !name.trim()}
           >
             {busy ? <Loader2 size={16} className="spin" /> : <Plus size={16} />}{" "}
             Create Workspace
           </button>
         </div>
         <p className="fine-print">
-          The private editor shortcut is remembered only in this browser. Share
-          the student link with your class.
+          The workspace is saved to your account. Share the student link with
+          your class; students never need to sign in.
         </p>
       </form>
     </Modal>

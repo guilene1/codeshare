@@ -3,7 +3,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { Awareness } from "y-protocols/awareness";
 import type { WebSocket } from "ws";
-import { equalHash } from "./access.js";
+import { equalHash, type Auth } from "./access.js";
 import { blockFields, MAX_BLOCKS, orderedBlocks } from "./blocks.js";
 import { templates } from "./templates.js";
 
@@ -124,6 +124,8 @@ export function addDocument(
 }
 export class Rooms {
   active = new Map<string, Room>();
+  // Credentials behind each live socket, so revoked sessions/links can be disconnected.
+  connections = new Map<WebSocket, Auth>();
   constructor(
     public db: DatabaseSync,
     public checkpointMs = 1500,
@@ -135,6 +137,7 @@ export class Rooms {
     editorHash: string | null = null,
     template?: string,
     description = "",
+    ownerId: string | null = null,
   ) {
     const id = randomBytes(12).toString("base64url"),
       now = Date.now(),
@@ -170,7 +173,7 @@ export class Rooms {
         addDocument(room, file, language, content);
     this.db
       .prepare(
-        "INSERT INTO rooms (id,name,created_at,updated_at,last_activity,state,editor_token_hash,description) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO rooms (id,name,created_at,updated_at,last_activity,state,editor_token_hash,description,owner_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         id,
@@ -181,6 +184,7 @@ export class Rooms {
         Y.encodeStateAsUpdate(doc),
         editorHash,
         description,
+        ownerId,
       );
     this.save(room);
     this.syncCatalog(id);
@@ -230,7 +234,7 @@ export class Rooms {
   info(id: string) {
     return this.db
       .prepare(
-        "SELECT id,name,description,created_at,updated_at FROM rooms WHERE id=?",
+        "SELECT id,name,description,created_at,updated_at,owner_id,editor_token_hash IS NOT NULL AS has_editor_link FROM rooms WHERE id=?",
       )
       .get(id);
   }
@@ -288,6 +292,11 @@ export class Rooms {
     for (const room of this.active.values())
       if (room.workspaceId === workspaceId)
         room.doc.getMap("catalog").set("tree", tree);
+  }
+  // Closes live sockets whose credentials match (after sign-out, link revocation, deletion).
+  disconnect(match: (auth: Auth) => boolean, reason: string) {
+    for (const [peer, auth] of this.connections)
+      if (match(auth)) peer.close(1008, reason);
   }
   canEditHash(id: string, supplied: string | undefined) {
     if (!supplied) return false;
