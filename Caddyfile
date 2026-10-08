@@ -13,7 +13,9 @@
     }
   }
 }
-{$DOMAIN} {
+
+# The Kodelumi site: static React app plus the Node API/WebSocket backend.
+(app) {
   encode zstd gzip
   header {
     -Server
@@ -38,4 +40,26 @@
     try_files {path} /index.html
     file_server
   }
+}
+
+# Permanent redirect to the primary domain, keeping path and query string
+# (e.g. shared links /w/ID?folder=...).
+(legacy_redirect) {
+  redir https://{$DOMAIN}{uri} permanent
+}
+
+# Primary domain (production: kodelumi.com).
+{$DOMAIN} {
+  import app
+}
+
+# www host always redirects to the primary domain.
+{$WWW_DOMAIN} {
+  import legacy_redirect
+}
+
+# Previous domain (production: devshare.gamela.shop). LEGACY_MODE selects either
+# "app" (keep serving during verification) or "legacy_redirect".
+{$LEGACY_DOMAIN} {
+  import {$LEGACY_MODE}
 }

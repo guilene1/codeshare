@@ -9,7 +9,8 @@ services:
       NODE_ENV: production
       PORT: 3000
       DB_PATH: /data/devshare.sqlite
-      ALLOWED_ORIGINS: https://${DOMAIN:?Set DOMAIN in .env}
+      # The previous domain stays an allowed origin (harmless once it only redirects).
+      ALLOWED_ORIGINS: https://${DOMAIN:?Set DOMAIN in .env},https://${LEGACY_DOMAIN:?Set LEGACY_DOMAIN in .env}
       TRUST_PROXY: "1"
       METRICS_TOKEN: ${METRICS_TOKEN:-}
       NODE_OPTIONS: --max-old-space-size=384
@@ -34,6 +35,10 @@ services:
       - "443:443/udp"
     environment:
       DOMAIN: ${DOMAIN:?Set DOMAIN in .env}
+      WWW_DOMAIN: ${WWW_DOMAIN:?Set WWW_DOMAIN in .env}
+      LEGACY_DOMAIN: ${LEGACY_DOMAIN:?Set LEGACY_DOMAIN in .env}
+      # "app" keeps the previous domain serving; "legacy_redirect" redirects it to DOMAIN.
+      LEGACY_MODE: ${LEGACY_MODE:-legacy_redirect}
       ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL in .env}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro

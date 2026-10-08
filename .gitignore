@@ -14,3 +14,5 @@ playwright-report/
 *.key
 .aws/
 load-test-report*.json
+# Local copies of production database backups
+backups/

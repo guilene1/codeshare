@@ -15,3 +15,7 @@ services:
       - "127.0.0.1:8080:80"
     environment:
       DOMAIN: ":80"
+      # Local stand-ins for the www and previous-domain sites (plain HTTP on port 80).
+      WWW_DOMAIN: "http://www.localhost"
+      LEGACY_DOMAIN: "http://legacy.localhost"
+      LEGACY_MODE: app
