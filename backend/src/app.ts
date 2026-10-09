@@ -18,6 +18,14 @@ import {
 import { Accounts, csrfFor, equalSecret, newToken, type Session } from "./auth.js";
 import { accountRoutes, authLimits, type AuthLimits } from "./accountRoutes.js";
 import { migrateSnippets } from "./migrate.js";
+import {
+  createMailer,
+  EmailOutbox,
+  emailConfig,
+  type EmailConfig,
+  type Mailer,
+  type OutboxOptions,
+} from "./mailer.js";
 import { templates } from "./templates.js";
 import {
   blockFields,
@@ -36,6 +44,9 @@ export function createApp(
     staticPath?: string;
     cookieSecure?: boolean;
     authLimits?: Partial<AuthLimits>;
+    email?: Partial<EmailConfig>;
+    mailer?: Mailer;
+    outbox?: OutboxOptions;
   } = {},
 ) {
   const projectRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -64,6 +75,22 @@ export function createApp(
         ? process.env.COOKIE_SECURE === "1"
         : process.env.NODE_ENV === "production"),
   );
+  // Transactional email (welcome + admin notifications) via a persistent SQLite outbox.
+  const mail = { ...emailConfig(), ...options.email };
+  const outbox = new EmailOutbox(
+    rooms.db,
+    mail,
+    options.mailer ?? createMailer(mail),
+    options.outbox,
+  );
+  outbox.recover();
+  outbox.kick();
+  // One startup line to confirm the email setup; it never includes the key itself.
+  if (mail.enabled && !options.mailer)
+    console.log(
+      `Email enabled: provider=${mail.provider}, from=${mail.from}, admins=${mail.admins.length}` +
+        (mail.provider === "resend" && !process.env.RESEND_API_KEY ? " (WARNING: RESEND_API_KEY is not set)" : ""),
+    );
   const app = express();
   app.disable("x-powered-by");
   app.set("trust proxy", process.env.TRUST_PROXY === "1" ? 1 : false);
@@ -170,7 +197,7 @@ export function createApp(
       ),
     });
   });
-  accountRoutes(app, accounts, rooms, origins, {
+  accountRoutes(app, accounts, rooms, origins, outbox, {
     ...authLimits(),
     ...options.authLimits,
   });
@@ -796,6 +823,7 @@ export function createApp(
   let sweeps = 0;
   const gc = setInterval(() => {
     rooms.collect();
+    outbox.kick();
     if (++sweeps % 240 === 0) accounts.purgeExpired();
   }, 15_000);
   gc.unref();
@@ -805,6 +833,7 @@ export function createApp(
     server,
     rooms,
     accounts,
+    outbox,
     close: async () => {
       if (closed) return;
       closed = true;

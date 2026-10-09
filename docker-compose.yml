@@ -13,6 +13,20 @@ services:
       ALLOWED_ORIGINS: https://${DOMAIN:?Set DOMAIN in .env},https://${LEGACY_DOMAIN:?Set LEGACY_DOMAIN in .env}
       TRUST_PROXY: "1"
       METRICS_TOKEN: ${METRICS_TOKEN:-}
+      # Transactional email through Resend or Amazon SES (off unless EMAIL_ENABLED=1).
+      EMAIL_ENABLED: ${EMAIL_ENABLED:-0}
+      # "resend" or "ses" (Amazon SES stays available as a fallback).
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-resend}
+      # Resend sending-only API key, kept only in the server .env.
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      SES_REGION: ${SES_REGION:-us-east-1}
+      EMAIL_FROM: ${EMAIL_FROM:-Kodelumi <no-reply@kodelumi.com>}
+      EMAIL_REPLY_TO: ${EMAIL_REPLY_TO:-}
+      ADMIN_NOTIFY_EMAILS: ${ADMIN_NOTIFY_EMAILS:-}
+      APP_URL: https://${DOMAIN:?Set DOMAIN in .env}
+      # Send-only IAM credentials, kept only in the server .env.
+      AWS_ACCESS_KEY_ID: ${SES_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${SES_SECRET_ACCESS_KEY:-}
       NODE_OPTIONS: --max-old-space-size=384
     volumes:
       - sqlite_data:/data

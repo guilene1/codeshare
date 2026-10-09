@@ -261,9 +261,11 @@ v2 adds user accounts. Its SQLite changes are **additive**: new `users`, `sessio
 - **Cookies** are `Secure` in production (`NODE_ENV=production`), which requires HTTPS; this is already the case behind Caddy. Auth rate limits can be tuned with `AUTH_SIGNUP_PER_HOUR`, `AUTH_SIGNIN_PER_15MIN` and `AUTH_FAILURES_PER_EMAIL` (defaults 10, 20, 10).
 - **Rolling back to v1** keeps all data (v1 ignores the new tables and column) but workspaces created in v2 have no editor link; issue one with `scripts/recover-editor.mjs` if v1 must edit them. Migrated `code-blocks.md` files appear as ordinary files in v1.
 
-## 5b. Planned domain migration: kodelumi.com
+## 5b. Domain migration to kodelumi.com (completed 2026-10-08)
 
-The application is domain-agnostic: the browser uses relative URLs, WebSockets follow the page's own origin, and Compose derives `ALLOWED_ORIGINS` and the Caddy site from `DOMAIN`. `devshare.gamela.shop` keeps working until you switch. **Nothing below has been done yet.**
+**Done.** Production serves `https://kodelumi.com` (commit `8be9d1f`). `www.kodelumi.com` and `devshare.gamela.shop` return 301 redirects that preserve path and query, driven by the server `.env`: `DOMAIN=kodelumi.com`, `WWW_DOMAIN=www.kodelumi.com`, `LEGACY_DOMAIN=devshare.gamela.shop`, `LEGACY_MODE=legacy_redirect` (set `LEGACY_MODE=app` to serve the app on the old domain again). Caddy obtains Let's Encrypt certificates for all three names; the unused ACM certificate for kodelumi.com cannot be exported to Caddy. Use `https://kodelumi.com` as the origin for `issue-password-reset.mjs` and `recover-editor.mjs`. The original migration notes follow for reference.
+
+The application is domain-agnostic: the browser uses relative URLs, WebSockets follow the page's own origin, and Compose derives `ALLOWED_ORIGINS` and the Caddy site from `DOMAIN`.
 
 **What changes for users on the new origin.** Browsers isolate storage per domain, so on `kodelumi.com`:
 
@@ -290,6 +292,51 @@ Workspaces, lessons, student links (`/w/ID`), co-editor links and backups are un
 6. **Operations**: use `https://kodelumi.com` as the origin argument for `scripts/issue-password-reset.mjs` and `scripts/recover-editor.mjs`, update bookmarks and documentation links, and keep the `devshare.gamela.shop` Route 53 record while the redirect is in use.
 
 **Rollback**: set `DOMAIN=devshare.gamela.shop`, remove the redirect block, and run `sudo docker compose up -d --no-build`.
+
+## 5c. Transactional email (Resend, Amazon SES fallback)
+
+New accounts get a branded welcome email, and every address in `ADMIN_NOTIFY_EMAILS` gets a signup notification (display name, email, registration time; never passwords, hashes, tokens or session data).
+
+**How it works.** Signup inserts rows into the SQLite `email_outbox` table after the account exists and returns immediately; a background loop (every 15 seconds and right after signup) sends them through the SESv2 API. `UNIQUE(user_id, kind, recipient)` plus an atomic `pending → sending` claim prevent duplicates; rows left in `sending` by a crash are retried after restart (at-least-once). Temporary errors (throttling, network, 5xx) retry after about 1, 5 and 30 minutes, up to 4 attempts. Permanent errors (for example `MessageRejected` for an unverified recipient while SES is in the sandbox) are marked `failed` at once. Logs mask addresses (`g***@utrains.org`) and never contain message bodies or credentials. Email problems never block or undo a registration.
+
+**AWS setup (us-east-1, done).**
+
+| Item | Value |
+|---|---|
+| Domain identity | `kodelumi.com`, Easy DKIM RSA-2048, verified |
+| DKIM | 3 CNAMEs `<token>._domainkey.kodelumi.com → <token>.dkim.amazonses.com` |
+| Custom MAIL FROM | `mail.kodelumi.com`: MX `10 feedback-smtp.us-east-1.amazonses.com`, TXT `v=spf1 include:amazonses.com ~all` |
+| DMARC | `_dmarc.kodelumi.com TXT "v=DMARC1; p=none"` (monitoring; move to `p=quarantine` after confirming passes) |
+| Suppression list | Account-level, bounces and complaints |
+| Sender | `Kodelumi <no-reply@kodelumi.com>`, reply-to `guilene.tiako@utrains.org` |
+| IAM | User `kodelumi-ses-sender`, inline policy: only `ses:SendEmail` on the kodelumi.com identity (and the two verified admin addresses, needed while in the sandbox), only when `ses:FromAddress` is `no-reply@kodelumi.com` |
+
+**Provider.** `EMAIL_PROVIDER=resend` (current choice, see [EMAIL_PROVIDERS.md](EMAIL_PROVIDERS.md)) or `ses`. Both use the same templates and outbox; Resend also receives a per-row `Idempotency-Key` (`kodelumi-outbox-<row id>`, kept 24 hours by Resend), so a crash between sending and recording cannot produce a second email. Resend free plan: 3,000 emails/month and 100/day; `daily_quota_exceeded` defers the row for an hour without using an attempt.
+
+**Server `.env`** (mode 600, never committed):
+
+```sh
+EMAIL_ENABLED=1
+EMAIL_PROVIDER=resend
+RESEND_API_KEY=...           # sending-only key restricted to kodelumi.com, written directly on the server
+SES_REGION=us-east-1
+EMAIL_FROM=Kodelumi <no-reply@kodelumi.com>
+EMAIL_REPLY_TO=guilene.tiako@utrains.org
+ADMIN_NOTIFY_EMAILS=guilene.tiako@utrains.org,serge.kamgang@utrains.org
+SES_ACCESS_KEY_ID=...        # kodelumi-ses-sender key, written directly on the server
+SES_SECRET_ACCESS_KEY=...
+```
+
+Compose maps the key to `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` for the application container only. `EMAIL_ENABLED=0` (the default) switches email off without a code change.
+
+**SES sandbox.** Until AWS grants production access, SES only delivers to verified addresses: administrator notifications (both admin addresses are verified identities) work, welcome emails to other addresses are marked `failed` with `MessageRejected`. After production access is granted, re-queue them:
+
+```sh
+sudo docker compose exec -T application node scripts/email-outbox.mjs list
+sudo docker compose exec -T application node scripts/email-outbox.mjs retry-failed welcome
+```
+
+**Checks.** `aws sesv2 get-account --region us-east-1` (production access, quota, enforcement), `aws sesv2 get-email-identity --region us-east-1 --email-identity kodelumi.com` (DKIM and MAIL FROM `SUCCESS`), application logs (`sudo docker compose logs application | grep Email`). Rotate the SES key like the backup key. Cost: $0.10 per 1,000 emails (2 to 3 per signup).
 
 ## 6. Operations
 

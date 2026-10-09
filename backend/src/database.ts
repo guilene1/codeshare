@@ -73,6 +73,16 @@ export function openDatabase(path: string) {
       token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, used_at INTEGER
     );`);
+  // Persistent email outbox: one row per (user, kind, recipient) so a signup can never
+  // produce duplicate emails, and pending rows survive restarts.
+  db.exec(`CREATE TABLE IF NOT EXISTS email_outbox (
+      id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL, recipient TEXT NOT NULL COLLATE NOCASE, status TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL,
+      last_error TEXT, message_id TEXT, created_at INTEGER NOT NULL, sent_at INTEGER,
+      UNIQUE (user_id, kind, recipient)
+    );
+    CREATE INDEX IF NOT EXISTS email_outbox_due ON email_outbox(status, next_attempt_at);`);
   // Legacy workspaces keep owner_id NULL until claimed with their editor link.
   if (
     !db

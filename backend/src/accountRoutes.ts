@@ -10,6 +10,7 @@ import {
   type Session,
 } from "./auth.js";
 import type { Rooms } from "./rooms.js";
+import type { EmailOutbox } from "./mailer.js";
 
 export type AuthLimits = {
   signupPerHour: number;
@@ -47,6 +48,7 @@ export function accountRoutes(
   accounts: Accounts,
   rooms: Rooms,
   origins: Set<string>,
+  outbox: EmailOutbox,
   limits: AuthLimits,
 ) {
   const failures = new FailureLimiter(limits.failuresPerEmail, 15 * 60_000);
@@ -101,6 +103,9 @@ export function accountRoutes(
           );
         const user = await accounts.create(displayName, email, password);
         res.status(201).json(begin(res, user.id));
+        // Emails are queued after the account exists and sent in the background;
+        // a mail problem can never undo or delay the registration.
+        outbox.enqueueSignup(user);
       } catch (error) {
         next(error);
       }

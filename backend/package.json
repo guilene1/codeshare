@@ -13,6 +13,7 @@
     "test": "tsx --test test/*.test.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-sesv2": "^3.1148.0",
     "@node-rs/argon2": "^2.2.2",
     "express": "^5.1.0",
     "express-rate-limit": "^8.1.0",
