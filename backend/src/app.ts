@@ -7,6 +7,7 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { openDatabase } from "./database.js";
 import { Rooms, addDocument, filename, language } from "./rooms.js";
+import { Images, MAX_IMAGE_BYTES, fetchImage } from "./images.js";
 import { setupWebsocket } from "./websocket.js";
 import * as Y from "yjs";
 import { randomUUID, timingSafeEqual } from "node:crypto";
@@ -58,6 +59,7 @@ export function createApp(
     ),
     options.checkpointMs,
   );
+  const images = new Images(rooms.db);
   const origins = new Set(
     options.origins ??
       (
@@ -121,15 +123,26 @@ export function createApp(
     }
     next();
   });
-  app.use(
-    "/api",
+  // Per-IP limits by risk. A class often shares one public IP (school NAT), so opening a
+  // share link (a handful of reads plus each image) for 100+ students must fit easily,
+  // while changes keep the strict budget. Sign-in/sign-up keep their own tighter limits.
+  const perMinute = (limit: number) =>
     rateLimit({
       windowMs: 60_000,
-      limit: 240,
+      limit,
       standardHeaders: "draft-8",
       legacyHeaders: false,
-    }),
-  );
+      message: { error: "Too many requests right now. Please wait a moment and try again." },
+    });
+  const writeLimit = perMinute(240),
+    readLimit = perMinute(1200),
+    imageLimit = perMinute(3000);
+  app.use("/api", (req, res, next) => {
+    if (req.method !== "GET" && req.method !== "HEAD") return writeLimit(req, res, next);
+    // Image bytes are immutable and cached by browsers; they are streamed in small chunks.
+    if (/^\/rooms\/[\w-]{16}\/images\/[\w-]{22}$/.test(req.path)) return imageLimit(req, res, next);
+    return readLimit(req, res, next);
+  });
   app.use("/api", (req, res, next) => {
     res.setHeader("Cache-Control", "no-store");
     if (
@@ -457,6 +470,39 @@ export function createApp(
       }
     rooms.db.prepare("DELETE FROM rooms WHERE id=?").run(id);
     res.json({ ok: true });
+  });
+  // Inline images: anyone with the workspace link can view; only editors upload.
+  const imageUploads = rateLimit({
+    windowMs: 10 * 60_000,
+    limit: 60,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+    message: { error: "Too many images at once. Wait a few minutes and try again." },
+  });
+  app.get("/api/rooms/:roomId/images/:imageId", (req, res) =>
+    images.serve(res.locals.workspace.id, req.params.imageId, res, req.headers["if-none-match"]),
+  );
+  app.post(
+    "/api/rooms/:roomId/images",
+    imageUploads,
+    express.raw({ type: () => true, limit: MAX_IMAGE_BYTES }),
+    (req, res) => {
+      const data = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      const image = images.store(res.locals.workspace.id, data);
+      rooms.record(res.locals.workspace.id, "image", "Added an image");
+      res.status(201).json(image);
+    },
+  );
+  app.post("/api/rooms/:roomId/images/import", imageUploads, async (req, res, next) => {
+    try {
+      if (typeof req.body?.url !== "string" || req.body.url.length > 2048)
+        throw Object.assign(new Error("Enter an image link."), { status: 400 });
+      const image = images.store(res.locals.workspace.id, await fetchImage(req.body.url));
+      rooms.record(res.locals.workspace.id, "image", "Added an image");
+      res.status(201).json(image);
+    } catch (error) {
+      next(error);
+    }
   });
   app.get("/api/rooms/:roomId/tree", (_req, res) =>
     res.json(rooms.tree(res.locals.workspace.id)),

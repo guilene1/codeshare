@@ -12,6 +12,7 @@ import type { WebsocketProvider } from "y-websocket";
 import type { FileDoc, Settings } from "../lib";
 import { aliases, isDocumentLanguage } from "../markdown";
 import { attachDocumentBlocks } from "./editorBlocks";
+import { imagesIn, type FoundImages } from "../documentImages";
 
 self.MonacoEnvironment = {
   getWorker(_id, label) {
@@ -172,6 +173,7 @@ export default function CodeEditor({
   onEditor,
   readOnly,
   onCreateBlock,
+  onImages,
 }: {
   file: FileDoc;
   provider: WebsocketProvider;
@@ -181,6 +183,7 @@ export default function CodeEditor({
   onEditor: (editor: monaco.editor.IStandaloneCodeEditor | null) => void;
   readOnly: boolean;
   onCreateBlock?: (content: string, language: string) => void;
+  onImages?: (found: FoundImages) => void;
 }) {
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null),
     bindingRef = useRef<MonacoBinding | null>(null),
@@ -188,6 +191,8 @@ export default function CodeEditor({
   const cleanup = useRef<() => void>(() => {});
   const createBlockRef = useRef(onCreateBlock);
   createBlockRef.current = onCreateBlock;
+  const imagesRef = useRef(onImages);
+  imagesRef.current = onImages;
   const languageRef = useRef(file.language);
   languageRef.current = file.language;
   const mount: OnMount = (editor) => {
@@ -242,7 +247,42 @@ export default function CodeEditor({
       isDocument: () => isDocumentLanguage(languageRef.current),
       readOnly,
     });
+    // Images pasted or dropped into a document upload and insert at the cursor, only when
+    // the clipboard really holds images. Monaco's own "paste as" handler captures file
+    // pastes on its container and stops them there, so listen one level higher.
+    const container = editor.getContainerDomNode().parentElement ?? editor.getContainerDomNode();
+    const takeImages = (event: ClipboardEvent | DragEvent, found: FoundImages) => {
+      if (
+        readOnly ||
+        !imagesRef.current ||
+        !isDocumentLanguage(languageRef.current) ||
+        (!found.files.length && !found.urls.length && !found.unsupported)
+      )
+        return;
+      event.preventDefault();
+      event.stopPropagation();
+      imagesRef.current(found);
+    };
+    const paste = (event: ClipboardEvent) => takeImages(event, imagesIn(event.clipboardData));
+    const drop = (event: DragEvent) => {
+      const found = imagesIn(event.dataTransfer, false);
+      if (!found.files.length && !found.unsupported) return;
+      // Insert where the files were dropped.
+      const target = editor.getTargetAtClientPoint(event.clientX, event.clientY);
+      if (target?.position) editor.setPosition(target.position);
+      takeImages(event, found);
+    };
+    const dragOver = (event: DragEvent) => {
+      if (!readOnly && event.dataTransfer?.types.includes("Files") && isDocumentLanguage(languageRef.current))
+        event.preventDefault();
+    };
+    container.addEventListener("paste", paste, true);
+    container.addEventListener("drop", drop, true);
+    container.addEventListener("dragover", dragOver, true);
     cleanup.current = () => {
+      container.removeEventListener("paste", paste, true);
+      container.removeEventListener("drop", drop, true);
+      container.removeEventListener("dragover", dragOver, true);
       blocks();
       cursor.dispose();
       binding.destroy();

@@ -8,6 +8,7 @@ import {
 } from "react";
 import {
   Code2,
+  ImagePlus,
   Sun,
   Moon,
   Plus,
@@ -65,7 +66,7 @@ import {
   SignUp,
 } from "./components/AuthPages";
 import { AuthContext, loadSession, useAuth, type AuthState, type User } from "./auth";
-import { fence, insertBlock, isDocumentLanguage } from "./markdown";
+import { fence, imageMarkdown, insertBlock, isDocumentLanguage } from "./markdown";
 import { BRAND, Logo, LogoMark, TAGLINE } from "./brand";
 import CourseExplorer from "./components/CourseExplorer";
 import { ClassroomAwareness } from "./components/ClassroomAwareness";
@@ -79,11 +80,16 @@ import {
   languages,
   readLocal,
   storeLocal,
+  imageUrl,
+  uploadImage,
   type FileDoc,
   type CodeBlock,
   type CourseTree,
   type Settings,
+  type UploadedImage,
 } from "./lib";
+import ImageDialog from "./components/ImageDialog";
+import { altFor, type FoundImages } from "./documentImages";
 const CodeEditor = lazy(() => import("./components/CodeEditor"));
 type RoomInfo = {
   id: string;
@@ -630,6 +636,7 @@ function Workspace({
     [blockDialog, setBlockDialog] = useState<
       (BlockDraft & { mode: "insert" | "selection" | "lesson" }) | null
     >(null),
+    [imageDialog, setImageDialog] = useState(false),
     [migrated, setMigrated] = useState(false),
     [migrating, setMigrating] = useState(false),
     [claiming, setClaiming] = useState(false),
@@ -793,6 +800,84 @@ function Workspace({
     ]);
     target.focus();
     return true;
+  }
+  // Uploads pasted/dropped/chosen images (original bytes, in order) and inserts them as
+  // image lines where the cursor was. Uploading can take a moment, so the spot is
+  // tracked with a decoration that follows collaborators' edits in the meantime.
+  async function addImages(found: FoundImages) {
+    const doc = current;
+    if (!isEditor || !doc || !isDocumentLanguage(doc.language)) return;
+    const sources: (File | string)[] = [...found.files, ...found.urls];
+    if (!sources.length) {
+      if (found.unsupported) notify("Paste or choose PNG, JPG, WebP or GIF images.");
+      return;
+    }
+    if (sources.length > 20) notify("Up to 20 images at a time: adding the first 20.");
+    const batch = sources.slice(0, 20);
+    const editor = markdownMode === "preview" ? null : editorRef.current;
+    const model = editor?.getModel();
+    const selection = editor?.getSelection();
+    const anchor =
+      editor && model && selection
+        ? editor.createDecorationsCollection([
+            {
+              range: {
+                startLineNumber: selection.startLineNumber,
+                startColumn: selection.startColumn,
+                endLineNumber: selection.startLineNumber,
+                endColumn: selection.startColumn,
+              },
+              options: { stickiness: 1 },
+            },
+          ])
+        : null;
+    const lines: string[] = [];
+    let failed = 0;
+    for (const [index, source] of batch.entries()) {
+      notify(
+        batch.length > 1 ? `Adding image ${index + 1} of ${batch.length}…` : "Adding image…",
+      );
+      try {
+        const image =
+          typeof source === "string"
+            ? await api<UploadedImage>(`/rooms/${id}/images/import`, "POST", { url: source }, credential)
+            : await uploadImage(id, source, credential);
+        lines.push(imageMarkdown(altFor(source), imageUrl(id, image.id)));
+      } catch (e) {
+        failed++;
+        notify((e as Error).message);
+      }
+    }
+    const range = anchor?.getRanges()[0];
+    anchor?.clear();
+    if (lines.length) {
+      const block = lines.join("\n\n");
+      if (editor && range && editor.getModel() === model && model && !model.isDisposed()) {
+        const source = model.getValue(),
+          offset = model.getOffsetAt({ lineNumber: range.startLineNumber, column: range.startColumn });
+        const change = insertBlock(source, offset, block);
+        editor.executeEdits("devshare-image", [
+          {
+            range: {
+              startLineNumber: range.startLineNumber,
+              startColumn: range.startColumn,
+              endLineNumber: range.startLineNumber,
+              endColumn: range.startColumn,
+            },
+            text: change.insert,
+            forceMoveMarkers: true,
+          },
+        ]);
+        editor.focus();
+      } else {
+        // Preview (or the editor closed meanwhile): add to the end of the same document.
+        const text = doc.content.toString();
+        doc.content.insert(text.length, insertBlock(text, text.length, block).insert);
+      }
+    }
+    if (lines.length && !failed)
+      notify(lines.length > 1 ? `Added ${lines.length} images` : "Image added");
+    else if (lines.length) notify(`Added ${lines.length} of ${batch.length} images`);
   }
   async function saveBlock(draft: BlockDraft) {
     if (!blockDialog) return;
@@ -1681,6 +1766,16 @@ function Workspace({
                         </button>
                       )}
                       {isEditor && (
+                        <button
+                          className="text-button insert-block-button"
+                          disabled={!connected}
+                          title="Insert images (or paste one with Ctrl / ⌘ V)"
+                          onClick={() => setImageDialog(true)}
+                        >
+                          <ImagePlus size={14} /> Insert Image
+                        </button>
+                      )}
+                      {isEditor && (
                         <div className="markdown-switch" aria-label="Markdown view">
                           <button
                             aria-pressed={markdownMode === "edit"}
@@ -1846,6 +1941,7 @@ function Workspace({
                     fontSize={settings.fontSize}
                     canEdit={isEditor && connected}
                     plain={current.language === "plaintext"}
+                    onImages={isEditor && connected ? addImages : undefined}
                     notify={notify}
                   />
                 ) : provider && current ? (
@@ -1858,6 +1954,7 @@ function Workspace({
                       onCreateBlock={
                         isEditor ? createBlockFromSelection : undefined
                       }
+                      onImages={isEditor && connected ? addImages : undefined}
                       key={current.id}
                       file={current}
                       readOnly={!isEditor}
@@ -1877,6 +1974,7 @@ function Workspace({
                           fontSize={settings.fontSize}
                           canEdit={isEditor && connected}
                           plain={current.language === "plaintext"}
+                          onImages={isEditor && connected ? addImages : undefined}
                           notify={notify}
                         />
                       )}
@@ -2164,6 +2262,9 @@ function Workspace({
             </button>
           </div>
         </Modal>
+      )}
+      {imageDialog && isEditor && (
+        <ImageDialog onClose={() => setImageDialog(false)} onInsert={(found) => void addImages(found)} />
       )}
       {blockDialog && (
         <CodeBlockDialog

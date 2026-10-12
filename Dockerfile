@@ -9,7 +9,8 @@ COPY backend/package.json backend/package.json
 RUN npm ci
 COPY frontend frontend
 COPY backend backend
-RUN npm run build
+COPY scripts/precompress.mjs scripts/precompress.mjs
+RUN npm run build && node scripts/precompress.mjs frontend/dist
 
 FROM node:24-bookworm-slim AS application
 ENV NODE_ENV=production PORT=3000 DB_PATH=/data/devshare.sqlite

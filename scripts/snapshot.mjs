@@ -1,5 +1,7 @@
 import { DatabaseSync, backup } from "node:sqlite";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { pipeline } from "node:stream/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,7 +15,8 @@ const db = new DatabaseSync(
 try {
   const path = join(directory, "snapshot.sqlite");
   await backup(db, path);
-  process.stdout.write(await readFile(path));
+  // Streamed, so a database holding many images never has to fit in memory.
+  await pipeline(createReadStream(path), process.stdout);
 } finally {
   db.close();
   await rm(directory, { recursive: true, force: true });

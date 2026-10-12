@@ -124,16 +124,25 @@ export async function api<T = { ok: boolean }>(
   body?: unknown,
   editorToken?: string,
 ): Promise<T> {
-  const response = await fetch("/api" + path, {
-    method,
-    credentials: "same-origin",
-    headers: {
-      "Content-Type": "application/json",
-      ...(editorToken ? { Authorization: `Bearer ${editorToken}` } : {}),
-      ...(csrfToken && method !== "GET" ? { "X-CSRF-Token": csrfToken } : {}),
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  const send = () =>
+    fetch("/api" + path, {
+      method,
+      credentials: "same-origin",
+      headers: {
+        "Content-Type": "application/json",
+        ...(editorToken ? { Authorization: `Bearer ${editorToken}` } : {}),
+        ...(csrfToken && method !== "GET" ? { "X-CSRF-Token": csrfToken } : {}),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  let response = await send();
+  // A whole class opening a link at once can briefly hit the server's rate limit. Reads
+  // are safe to repeat, so wait as the server asks (plus jitter) and try again.
+  for (let attempt = 1; response.status === 429 && method === "GET" && attempt <= 3; attempt++) {
+    const wait = Math.min(Number(response.headers.get("Retry-After")) || attempt * 2, 10);
+    await new Promise((resolve) => setTimeout(resolve, wait * 1000 + Math.random() * 1500));
+    response = await send();
+  }
   const result = await response.json().catch(() => ({}));
   if (!response.ok)
     throw new ApiError(
@@ -142,6 +151,26 @@ export async function api<T = { ok: boolean }>(
     );
   return result;
 }
+export type UploadedImage = { id: string; mime: string; width: number; height: number };
+// Sends an image's original bytes unchanged (never resized or re-encoded).
+export async function uploadImage(workspaceId: string, file: Blob, editorToken?: string) {
+  const response = await fetch(`/api/rooms/${workspaceId}/images`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      "Content-Type": file.type || "application/octet-stream",
+      ...(editorToken ? { Authorization: `Bearer ${editorToken}` } : {}),
+      ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {}),
+    },
+    body: file,
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok)
+    throw new ApiError(result.error ?? "The image could not be added.", response.status);
+  return result as UploadedImage;
+}
+export const imageUrl = (workspaceId: string, imageId: string) =>
+  `/api/rooms/${workspaceId}/images/${imageId}`;
 export function initials(name: string) {
   return name
     .trim()

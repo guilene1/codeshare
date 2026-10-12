@@ -105,3 +105,34 @@ The local Docker stack passed sequential 50-, 100- and 200-anonymous-viewer runs
 | 200 | 81.3 ms | 91.9 MiB | 98.8% |
 
 These are measurements of this local workload, not maximum-capacity claims or Lightsail benchmarks. Repeat representative production tests with host, container and network monitoring before resizing decisions.
+
+## Classroom test: 100 anonymous viewers on one share link
+
+`scripts/viewer-load-test.mjs` simulates a class opening the same read-only link at once. It records what a real Chromium viewer requests (HTML, assets, API reads, images, WebSocket), replays that for every simulated viewer from **one IP address** (a school NAT), keeps a few real Chromium viewers open alongside, holds all live Yjs connections for a soak while an instructor edits every 5 s, checks that anonymous viewers cannot change anything, and cleans up its workspace. It refuses production hostnames.
+
+```sh
+docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.local.yml -p devshare-local up -d --build
+METRICS_TOKEN=local-preview-metrics-only node scripts/viewer-load-test.mjs --url=http://127.0.0.1:8080 \
+  --viewers=100 --browsers=4 --soak-min=15 --burst-ms=3000 --output=classroom-report.json
+```
+
+Use `127.0.0.1`, not `localhost`, on Windows: `localhost` tries IPv6 first and adds ~210 ms to every new connection there.
+
+### Results (2026-10-12, local Docker with production limits: app 512 MiB / 1.5 CPU, Node heap 384 MiB)
+
+Workspace: 4 documents (Kubernetes YAML, Markdown lesson with YAML/Bash blocks and GitHub links, Plain Text notes), 3 original-resolution images (1.4 MiB PNG, 2.8 MiB PNG, animated GIF). 100 viewers + 4 real browsers joined within 3 s.
+
+| | Before fixes | After fixes |
+|---|---|---|
+| Viewers fully loaded | 27 % (381 × HTTP 429; real browsers: "We couldn't open this workspace") | **100 %** (1,300/1,300 requests 200) |
+| Page load p50 / p95 | — | **4.8 s / 5.3 s** (real Chromium: 1.6–2.9 s) |
+| API / image p50 | — | **0.23 s / 0.30 s** |
+| Live edit to all 100 viewers (15-min soak, 180 edits) | — | **180/180 delivered**, p50 124 ms, p95 230 ms |
+| Disconnects in 15 min | — | **0** |
+| App RSS peak / heap (first → last third of soak) | — | **201 MiB / 18 → 19 MiB** (no leak); sockets 0 and session evicted after teardown |
+| App CPU | — | soak average **5–7 % of one core**, burst peak ~65 % |
+| Caddy for 100 first visits | 9.3–16.0 CPU-s; 5,611 memory-limit reclaims at 128 MiB | **0.24–0.31 CPU-s**; **0** reclaims at 256 MiB (peak 214 MiB incl. file cache) |
+
+Fixes: read-only GETs and immutable image GETs have their own per-IP limits (1,200 and 3,000/min; writes stay 240/min), the client retries reads and images after HTTP 429, static files are precompressed at build time (`scripts/precompress.mjs`, Caddy `precompressed`), and Caddy's memory limit is 256m. Anonymous upload, import, create, rename, delete and Yjs writes were all refused; forged "editor" presence was rewritten to "viewer".
+
+Bandwidth per first visit is ~1 MiB of app code plus the lesson's images at original size (4.4 MiB here); browsers cache both afterwards. A class sharing a slow school connection is limited by that connection, not by the server.

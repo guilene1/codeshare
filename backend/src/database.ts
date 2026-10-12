@@ -94,5 +94,17 @@ export function openDatabase(path: string) {
   db.exec(
     "CREATE INDEX IF NOT EXISTS rooms_owner ON rooms(owner_id, updated_at DESC)",
   );
+  // Inline document images (additive). Original bytes in 256 KB chunks; deleting a
+  // workspace removes its images.
+  db.exec(`CREATE TABLE IF NOT EXISTS images (
+      id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+      mime TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL,
+      size INTEGER NOT NULL, sha256 TEXT NOT NULL, created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS images_workspace ON images(workspace_id);
+    CREATE TABLE IF NOT EXISTS image_chunks (
+      image_id TEXT NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+      seq INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY (image_id, seq)
+    );`);
   return db;
 }

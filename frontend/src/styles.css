@@ -2275,3 +2275,61 @@ span.doc-block-language { display:inline-block; }
 .hero-copy h1 span { background: var(--brand-gradient); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .eyebrow { letter-spacing: .4px; }
 .auth-aside .brand { font-size: 22px; }
+
+/* ---- Inline document images (diagrams, screenshots, GIFs) ---- */
+/* Like code blocks, images may use the whole document width (prose keeps its measure). */
+.markdown-preview > .doc-image { max-width: none; }
+.doc-image { position: relative; margin: 6px 0; width: fit-content; max-width: 100%; }
+.markdown-preview.numbered .doc-image.pv-line::before { top: 4px; }
+/* Original resolution and aspect ratio: never cropped, never upscaled past natural size;
+   large images shrink to the available width. */
+.doc-image-open {
+  display: block; padding: 0; margin: 0; border: 1px solid var(--border); border-radius: 8px;
+  background: #fff; overflow: hidden; cursor: zoom-in; max-width: 100%; line-height: 0;
+  box-shadow: 0 6px 18px -14px #000a;
+}
+.doc-image-open img { display: block; width: auto; max-width: 100%; height: auto; }
+.doc-image.sized .doc-image-open img { width: 100%; }
+.doc-image-open:hover { border-color: var(--accent); }
+.doc-image-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.doc-image-resize {
+  position: absolute; right: -6px; bottom: -6px; width: 16px; height: 16px; border-radius: 4px;
+  background: var(--accent); border: 2px solid var(--surface); cursor: nwse-resize; opacity: 0;
+  touch-action: none; transition: opacity .15s;
+}
+.doc-image:hover .doc-image-resize, .doc-image-resize:active { opacity: 1; }
+.doc-image-missing { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: .9em; border: 1px dashed var(--border); border-radius: 6px; padding: 8px 12px; }
+.image-dialog input[type=file] { padding: 8px 0; }
+
+/* Full-screen image viewer */
+.image-viewer { position: fixed; inset: 0; z-index: 1000; display: flex; flex-direction: column; background: #070a10; color: #e6ecf5; }
+.image-viewer-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  padding: 8px 12px; background: #0e131c; border-bottom: 1px solid #263041; font-size: 13px;
+}
+.image-viewer-title { display: flex; align-items: baseline; gap: 10px; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 600; }
+.image-viewer-title small { color: #8a97ab; font-weight: 400; }
+.image-viewer-tools { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.image-viewer-tools .icon-button, .image-viewer-tools .text-button { color: #d4dce8; padding: 6px 8px; border-radius: 6px; font-size: 12px; text-decoration: none; }
+.image-viewer-tools .icon-button:hover, .image-viewer-tools .text-button:hover { background: #ffffff14; color: #fff; }
+.image-viewer-zoom { min-width: 52px; text-align: center; font-variant-numeric: tabular-nums; color: #d4dce8; }
+.image-viewer-close { margin-left: 6px; background: #ffffff10 !important; }
+.image-viewer-stage { position: relative; flex: 1; overflow: hidden; cursor: grab; touch-action: none; user-select: none; }
+.image-viewer-stage:active { cursor: grabbing; }
+.image-viewer-stage img { position: absolute; left: 0; top: 0; max-width: none; transform-origin: 0 0; background: #fff; box-shadow: 0 10px 40px #000c; }
+@media (max-width: 650px) {
+  .image-viewer-title small { display: none; }
+  .image-viewer-tools .text-button { padding: 6px; }
+}
+
+/* ---- Links in documents: blue and underlined so they read as links in both themes ---- */
+.markdown-preview a.doc-link { color: #58a6ff; text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; cursor: pointer; }
+.markdown-preview a.doc-link:hover { color: #79b8ff; text-decoration-thickness: 2px; }
+.markdown-preview a.doc-link:focus-visible { outline: 2px solid #58a6ff; outline-offset: 2px; border-radius: 2px; }
+:root[data-theme="light"] .markdown-preview a.doc-link { color: #0969da; }
+:root[data-theme="light"] .markdown-preview a.doc-link:hover { color: #0550ae; }
+/* Narrow previews (e.g. Split): the "auto" badge never breaks per letter, and the block's
+   controls wrap onto a second row instead of squeezing the language label. */
+.inline-block-detected, .inline-block-label { white-space: nowrap; flex-shrink: 0; }
+.markdown-code .inline-block-header { flex-wrap: wrap; row-gap: 4px; }
+.markdown-code .inline-block-actions { flex-wrap: wrap; justify-content: flex-end; margin-left: auto; }

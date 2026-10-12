@@ -61,7 +61,10 @@ services:
     depends_on:
       application:
         condition: service_healthy
-    mem_limit: 128m
+    # A class of 100 opening a link at once holds hundreds of connections and streams
+    # images; 128m was hit thousands of times in local load tests (no OOM, but forced
+    # reclaim). Measured peak with precompressed assets stays well below 256m.
+    mem_limit: 256m
     logging:
       driver: json-file
       options:

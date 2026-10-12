@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useEffect,
   useRef,
   useState,
@@ -10,6 +11,7 @@ import {
   ArrowUp,
   Check,
   Copy,
+  ImageOff,
   Pencil,
   Plus,
   Trash2,
@@ -20,6 +22,7 @@ import {
   deleteSegment,
   detectLanguage,
   fence,
+  imageMarkdown,
   insertBlock,
   languageId,
   languageLabel,
@@ -27,12 +30,31 @@ import {
   parseMarkdown,
   replaceSegment,
   setFenceLanguage,
+  workspaceImage,
   type CodeSegment,
+  type ImageSegment,
   type Segment,
   type TextEdit,
 } from "../markdown";
 import CodeBlockDialog from "./CodeBlockDialog";
+import ImageViewer from "./ImageViewer";
+import { imagesIn, type FoundImages } from "../documentImages";
+import { findLinks } from "../links";
 import HighlightedLines, { languageAccent } from "./HighlightedCode";
+
+// Bare http(s) addresses in prose become links that open in a new tab. Used for
+// Markdown text and Plain Text documents; never for inline code or code blocks.
+function linkify(text: string): ReactNode[] {
+  return findLinks(text).map((part, index) =>
+    part.href ? (
+      <a key={index} className="doc-link" href={part.href} target="_blank" rel="noopener noreferrer">
+        {part.text}
+      </a>
+    ) : (
+      part.text
+    ),
+  );
+}
 
 // Source text is rendered only as React text nodes; links are limited to safe schemes.
 function inline(text: string): ReactNode[] {
@@ -43,14 +65,15 @@ function inline(text: string): ReactNode[] {
     if (part.startsWith("`"))
       return <code key={index}>{part.slice(1, -1)}</code>;
     if (part.startsWith("**"))
-      return <strong key={index}>{part.slice(2, -2)}</strong>;
-    if (part.startsWith("*")) return <em key={index}>{part.slice(1, -1)}</em>;
+      return <strong key={index}>{linkify(part.slice(2, -2))}</strong>;
+    if (part.startsWith("*")) return <em key={index}>{linkify(part.slice(1, -1))}</em>;
     const link = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(part);
     if (link) {
       if (/^(https?:\/\/|mailto:|#)/i.test(link[2]))
         return (
           <a
             key={index}
+            className="doc-link"
             href={link[2]}
             rel="noopener noreferrer"
             target={link[2].startsWith("#") ? undefined : "_blank"}
@@ -60,7 +83,7 @@ function inline(text: string): ReactNode[] {
         );
       return <span key={index}>{link[1]}</span>;
     }
-    return part;
+    return <Fragment key={index}>{linkify(part)}</Fragment>;
   });
 }
 
@@ -161,6 +184,108 @@ function InlineCodeBlock({
   );
 }
 
+// An inline document image: original resolution, never cropped or upscaled; large
+// images fill the document width. Clicking opens the full-screen zoom viewer.
+function DocImage({
+  segment,
+  line,
+  onResize,
+}: {
+  segment: ImageSegment;
+  line: number;
+  // Editors only: saves a display width in pixels (undefined = original size).
+  onResize?: (width: number | undefined) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [failed, setFailed] = useState(false);
+  // A busy moment (e.g. a whole class loading at once) can briefly refuse an image;
+  // retry a few times with growing pauses before showing it as unavailable.
+  const [attempt, setAttempt] = useState(0);
+  const retry = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(retry.current), []);
+  const [dragWidth, setDragWidth] = useState<number | null>(null);
+  const figure = useRef<HTMLElement>(null);
+  const width = dragWidth ?? segment.width;
+  if (!workspaceImage(segment.src))
+    return (
+      <p className="pv-line doc-image-missing" data-line={line}>
+        <ImageOff size={14} /> Image not shown: only images added to Kodelumi are displayed
+        {segment.alt ? ` (${segment.alt})` : ""}.
+      </p>
+    );
+  return (
+    <figure
+      ref={figure}
+      className={"pv-line doc-image" + (width ? " sized" : "")}
+      data-line={line}
+    >
+      {failed ? (
+        <span className="doc-image-missing">
+          <ImageOff size={14} /> This image could not be loaded{segment.alt ? `: ${segment.alt}` : ""}.
+        </span>
+      ) : (
+        <button
+          type="button"
+          className="doc-image-open"
+          aria-label={`Open image full screen${segment.alt ? ": " + segment.alt : ""}`}
+          title="Click to zoom"
+          onClick={() => setOpen(true)}
+          style={width ? { width } : undefined}
+        >
+          <img
+            src={attempt ? `${segment.src}?retry=${attempt}` : segment.src}
+            alt={segment.alt}
+            loading="lazy"
+            decoding="async"
+            draggable={false}
+            onError={() => {
+              if (attempt >= 3) setFailed(true);
+              else retry.current = setTimeout(() => setAttempt((n) => n + 1), (attempt + 1) * 2000 + Math.random() * 1000);
+            }}
+          />
+        </button>
+      )}
+      {onResize && !failed && (
+        <span
+          className="doc-image-resize"
+          role="separator"
+          aria-label="Resize image (double-click for original size)"
+          title="Drag to resize · double-click for original size"
+          onDoubleClick={() => onResize(undefined)}
+          onPointerDown={(event) => {
+            const img = figure.current?.querySelector("img");
+            if (!img) return;
+            event.preventDefault();
+            const handle = event.currentTarget;
+            handle.setPointerCapture(event.pointerId);
+            const startX = event.clientX,
+              startWidth = img.getBoundingClientRect().width,
+              available = figure.current!.clientWidth;
+            let next = startWidth;
+            const move = (e: PointerEvent) => {
+              next = Math.round(Math.min(available, Math.max(80, startWidth + e.clientX - startX)));
+              setDragWidth(next);
+            };
+            const up = () => {
+              handle.removeEventListener("pointermove", move);
+              handle.removeEventListener("pointerup", up);
+              setDragWidth(null);
+              // Full width is the default, so it is stored as "no width".
+              if (Math.abs(next - startWidth) >= 2)
+                onResize(next >= available - 2 ? undefined : next);
+            };
+            handle.addEventListener("pointermove", move);
+            handle.addEventListener("pointerup", up);
+          }}
+        />
+      )}
+      {open && (
+        <ImageViewer src={segment.src} alt={segment.alt} onClose={() => setOpen(false)} />
+      )}
+    </figure>
+  );
+}
+
 // Applies a text edit only if the targeted element is still exactly as rendered, so a
 // collaborator's concurrent change is never silently overwritten.
 function applyEdit(
@@ -190,13 +315,36 @@ export default function MarkdownPreview({
   canEdit = false,
   plain = false,
   notify,
+  onImages,
 }: {
   file: FileDoc;
   fontSize: number;
   canEdit?: boolean;
   plain?: boolean;
   notify?: (message: string) => void;
+  // Editors in Preview: images pasted or dropped here are added at the end.
+  onImages?: (found: FoundImages) => void;
 }) {
+  const imagesRef = useRef(onImages);
+  imagesRef.current = onImages;
+  // Preview has no text cursor, so Ctrl+V anywhere outside an input adds images.
+  useEffect(() => {
+    if (!canEdit) return;
+    const paste = (event: ClipboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (
+        !imagesRef.current ||
+        target?.closest("input, textarea, select, [contenteditable], .monaco-editor, [role=dialog]")
+      )
+        return;
+      const found = imagesIn(event.clipboardData);
+      if (!found.files.length && !found.urls.length && !found.unsupported) return;
+      event.preventDefault();
+      imagesRef.current(found);
+    };
+    document.addEventListener("paste", paste);
+    return () => document.removeEventListener("paste", paste);
+  }, [canEdit]);
   const [source, setSource] = useState(() => file.content.toString());
   const [editing, setEditing] = useState<
     { segment: CodeSegment; raw: string } | "new" | null
@@ -321,6 +469,23 @@ export default function MarkdownPreview({
           />
         );
       }
+      case "image":
+        return (
+          <DocImage
+            key={key}
+            segment={segment}
+            line={first + 1}
+            onResize={
+              canEdit
+                ? (width) =>
+                    run(segment, (_s, all, i) => {
+                      const image = all[i] as ImageSegment;
+                      return replaceSegment(image, imageMarkdown(image.alt, image.src, width));
+                    })
+                : undefined
+            }
+          />
+        );
       case "heading": {
         const text = inline(segment.text);
         const line = { className: "pv-line", "data-line": first + 1 };
@@ -366,7 +531,7 @@ export default function MarkdownPreview({
           <p key={key}>
             {range(first, last).map((n) => (
               <span key={n} className="pv-line" data-line={n + 1}>
-                {plain ? sourceLine(n) : inline(sourceLine(n))}
+                {plain ? linkify(sourceLine(n)) : inline(sourceLine(n))}
               </span>
             ))}
           </p>
@@ -388,6 +553,19 @@ export default function MarkdownPreview({
       className="markdown-preview numbered"
       aria-label="Markdown preview"
       style={{ fontSize }}
+      onDragOver={(event) => {
+        if (canEdit && onImages && event.dataTransfer.types.includes("Files")) {
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "copy";
+        }
+      }}
+      onDrop={(event) => {
+        if (!canEdit || !onImages) return;
+        const found = imagesIn(event.dataTransfer, false);
+        if (!found.files.length && !found.unsupported) return;
+        event.preventDefault();
+        onImages(found);
+      }}
     >
       {output.length ? (
         output

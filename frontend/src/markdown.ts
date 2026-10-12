@@ -9,8 +9,15 @@ export type CodeSegment = Base & {
   language: string;
   content: string;
 };
+export type ImageSegment = Base & {
+  type: "image";
+  alt: string;
+  src: string;
+  width?: number;
+};
 export type Segment =
   | CodeSegment
+  | ImageSegment
   | (Base & { type: "heading"; level: number; text: string })
   | (Base & { type: "hr" })
   | (Base & { type: "quote"; text: string })
@@ -116,8 +123,19 @@ export function detectLanguage(content: string): string | null {
   return null;
 }
 
-// `plain` (Plain Text documents): only fenced code blocks are special; all other text
-// stays literal paragraphs, so "# note" or "- item" are not reformatted.
+const IMAGE_LINE = /^\s*!\[([^\]\n]*)\]\(([^)\s]+)\)\s*$/;
+// Markdown for an inserted image; the alt text never contains brackets or newlines.
+export function imageMarkdown(alt: string, src: string, width?: number) {
+  const label = alt.replace(/[[\]|\n\r]/g, " ").trim().slice(0, 120);
+  return `![${label}${width ? "|" + Math.round(width) : ""}](${src})`;
+}
+// Workspace images uploaded to Kodelumi; other sources are not loaded (the content
+// security policy would block them, and they could track viewers).
+export const workspaceImage = (src: string) =>
+  /^\/api\/rooms\/[A-Za-z0-9_-]{16}\/images\/[A-Za-z0-9_-]{22}$/.test(src);
+
+// `plain` (Plain Text documents): only fenced code blocks and image lines are special;
+// all other text stays literal paragraphs, so "# note" or "- item" are not reformatted.
 export function parseMarkdown(source: string, plain = false): Segment[] {
   const lines = source.split("\n");
   const offsets: number[] = [];
@@ -153,6 +171,22 @@ export function parseMarkdown(source: string, plain = false): Segment[] {
         language: fence[2],
         content: code.join("\n"),
       });
+      continue;
+    }
+    // An image on its own line (documents of either kind): ![alt|width](src).
+    const image = IMAGE_LINE.exec(line);
+    if (image) {
+      const [, label, src] = image;
+      const sized = /^(.*?)\|(\d{2,5})$/.exec(label);
+      segments.push({
+        type: "image",
+        start,
+        end: lineEnd(index),
+        alt: sized ? sized[1] : label,
+        src,
+        ...(sized ? { width: Number(sized[2]) } : {}),
+      });
+      index++;
       continue;
     }
     const heading = plain ? null : /^(#{1,6})\s+(.+)$/.exec(line);
@@ -197,6 +231,7 @@ export function parseMarkdown(source: string, plain = false): Segment[] {
     while (
       index < lines.length &&
       lines[index].trim() &&
+      !IMAGE_LINE.test(clean(lines[index])) &&
       !(plain
         ? /^\s*(?:`{3}|~{3})/
         : /^\s*(?:#{1,6}\s|`{3}|~{3}|>|[-*+]\s|\d+\.\s)/
