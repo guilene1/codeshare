@@ -11,6 +11,7 @@ import {
   Trash2,
 } from "lucide-react";
 import Modal from "./Modal";
+import HighlightedLines from "./HighlightedCode";
 import { languages, type CodeBlock } from "../lib";
 
 type Draft = Pick<CodeBlock, "title" | "language" | "content">;
@@ -30,7 +31,6 @@ type Props = {
 
 function BlockCard({
   block,
-  dark,
   fontSize,
   canEdit,
   busy,
@@ -41,7 +41,6 @@ function BlockCard({
   onMove,
 }: {
   block: CodeBlock;
-  dark: boolean;
   fontSize: number;
   canEdit: boolean;
   busy: boolean;
@@ -51,27 +50,9 @@ function BlockCard({
   onDelete: () => void;
   onMove: (direction: number) => void;
 }) {
-  const [highlighted, setHighlighted] = useState("");
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState("");
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  useEffect(() => {
-    let canceled = false;
-    setHighlighted("");
-    import("./CodeEditor")
-      .then((module) =>
-        module.colorizeCode(block.content, block.language, dark),
-      )
-      .then((html) => {
-        if (!canceled) setHighlighted(html);
-      })
-      .catch(() => {
-        /* Plain code remains visible if highlighting cannot load. */
-      });
-    return () => {
-      canceled = true;
-    };
-  }, [block.content, block.language, dark]);
   useEffect(() => () => clearTimeout(timer.current), []);
   async function copy() {
     try {
@@ -93,11 +74,10 @@ function BlockCard({
       aria-label="Snippet code"
     >
       <code>
-        {highlighted ? (
-          <span dangerouslySetInnerHTML={{ __html: highlighted }} />
-        ) : (
-          block.content
-        )}
+        <HighlightedLines
+          lines={block.content.replace(/\r\n/g, "\n").replace(/\n$/, "").split("\n")}
+          language={block.language}
+        />
       </code>
     </pre>
   );
@@ -288,7 +268,6 @@ export default function CodeBlocks({
             <BlockCard
               key={block.id}
               block={block}
-              dark={dark}
               fontSize={fontSize}
               canEdit={canEdit}
               busy={busy || !connected}

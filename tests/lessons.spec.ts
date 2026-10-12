@@ -526,12 +526,12 @@ test("Plain Text documents: typing ``` creates interactive code blocks with Copy
     for (const label of ["Edit code block", "Delete code block", "Insert Code Block", "Add code block"])
       await expect(viewer.getByRole("button", { name: label })).toHaveCount(0);
     await viewer.screenshot({ path: "test-results/plain-text-student.png" });
-    // Read-only Source view still renders blocks with Copy code, but no language picker.
-    await viewer.getByRole("button", { name: "Source", exact: true }).click();
-    const readOnly = viewer.locator(".monaco-editor").first();
-    await expect(readOnly.locator(".doc-block-toolbar")).toHaveCount(2);
-    await expect(readOnly.locator("select")).toHaveCount(0);
-    await readOnly.locator(".doc-block-toolbar").first().getByRole("button", { name: "Copy code" }).click();
+    // Students have no Source view: the document opens formatted, without a view toggle,
+    // editor, or language picker.
+    await expect(viewer.locator(".markdown-switch")).toHaveCount(0);
+    await expect(viewer.locator(".monaco-editor")).toHaveCount(0);
+    await expect(viewer.locator(".markdown-preview select")).toHaveCount(0);
+    await viewer.locator(".inline-block").first().getByRole("button", { name: "Copy code" }).click();
     expect(await clipboard(viewer)).toBe("terraform version");
     expect(errors).toEqual([]);
   } finally {

@@ -10,7 +10,7 @@ import { MonacoBinding } from "y-monaco";
 import * as Y from "yjs";
 import type { WebsocketProvider } from "y-websocket";
 import type { FileDoc, Settings } from "../lib";
-import { isDocumentLanguage } from "../markdown";
+import { aliases, isDocumentLanguage } from "../markdown";
 import { attachDocumentBlocks } from "./editorBlocks";
 
 self.MonacoEnvironment = {
@@ -54,6 +54,8 @@ monaco.languages.setMonarchTokensProvider("hcl", {
       [/\/\*/, "comment", "@comment"],
       [/"([^"\\]|\\.)*"/, "string"],
       [/\b\d+(\.\d+)?\b/, "number"],
+      // Attribute names (`region = …`) read like keys, as in VS Code.
+      [/([a-zA-Z_][\w-]*)(\s*)(=)(?!=)/, ["variable", "white", "operator"]],
       [
         /[a-zA-Z_][\w-]*/,
         { cases: { "@keywords": "keyword", "@default": "identifier" } },
@@ -82,6 +84,23 @@ monaco.languages.setLanguageConfiguration("hcl", {
     { open: '"', close: '"' },
   ],
 });
+// Fence names authors type (```bash, ```yml, ```terraform, ```k8s) resolve to Monaco
+// languages, so Markdown code fences are highlighted while editing.
+for (const [alias, id] of Object.entries(aliases))
+  if (id !== "plaintext" && id !== "markdown")
+    monaco.languages.register({ id, aliases: [alias] });
+// Plain Text documents: prose stays uncoloured; fenced blocks get their language's colours.
+monaco.languages.setMonarchTokensProvider("plaintext", {
+  tokenizer: {
+    root: [
+      [/^\s*```\s*([\w+#.-]+)\s*$/, { token: "comment", next: "@backticks", nextEmbedded: "$1" }],
+      [/^\s*~~~\s*([\w+#.-]+)\s*$/, { token: "comment", next: "@tildes", nextEmbedded: "$1" }],
+      [/.+/, ""],
+    ],
+    backticks: [[/^\s*```+\s*$/, { token: "comment", next: "@pop", nextEmbedded: "@pop" }]],
+    tildes: [[/^\s*~~~+\s*$/, { token: "comment", next: "@pop", nextEmbedded: "@pop" }]],
+  },
+});
 monaco.editor.defineTheme("devshare-dark", {
   base: "vs-dark",
   inherit: true,
@@ -90,6 +109,9 @@ monaco.editor.defineTheme("devshare-dark", {
     { token: "keyword", foreground: "B79CFF" },
     { token: "string", foreground: "A3D5AC" },
     { token: "number", foreground: "F2BC79" },
+    { token: "type.yaml", foreground: "9CDCFE" },
+    { token: "string.key.json", foreground: "9CDCFE" },
+    { token: "variable.hcl", foreground: "9CDCFE" },
   ],
   colors: {
     "editor.background": "#11151D",
@@ -111,6 +133,9 @@ monaco.editor.defineTheme("devshare-light", {
     { token: "keyword", foreground: "7952B3" },
     { token: "string", foreground: "397F5A" },
     { token: "number", foreground: "A76A30" },
+    { token: "type.yaml", foreground: "0451A5" },
+    { token: "string.key.json", foreground: "0451A5" },
+    { token: "variable.hcl", foreground: "0451A5" },
   ],
   colors: {
     "editor.background": "#FFFFFF",
@@ -121,9 +146,21 @@ monaco.editor.defineTheme("devshare-light", {
   },
 });
 
-export function colorizeCode(content: string, language: string, dark: boolean) {
-  monaco.editor.setTheme(dark ? "devshare-dark" : "devshare-light");
-  return monaco.editor.colorize(content, language, { tabSize: 2 });
+// Token boundaries and types per line, for rendering read-only code as plain text nodes.
+export async function tokenizeCode(content: string, language: string) {
+  for (let attempt = 0; ; attempt++) {
+    // colorize waits for a lazily registered tokenizer to load; tokenize does not.
+    await monaco.editor.colorize("", language, {});
+    const lines = monaco.editor.tokenize(content, language);
+    // JSON installs its tokenizer only when a model of that language first exists and
+    // its language chunk has loaded, so an all-untyped result for a real language
+    // creates a throwaway model once and is retried briefly before giving up.
+    const untyped = lines.every((line) => line.every((token) => !token.type));
+    if (!untyped || language === "plaintext" || !content.trim() || attempt >= 20)
+      return lines.map((line) => line.map(({ offset, type }) => ({ offset, type })));
+    if (!attempt) monaco.editor.createModel("", language).dispose();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
 }
 
 export default function CodeEditor({

@@ -133,11 +133,12 @@ test("line numbers show in every file type, both themes, while scrolling, and fo
     await expect(owner.locator(".monaco-editor .doc-block-toolbar")).toHaveCount(1);
     await expect(owner.locator(".monaco-editor .doc-block-toolbar").getByRole("button", { name: "Copy code" })).toBeVisible();
     expect((await gutter(owner)).numbers.slice(0, 6)).toEqual(["1", "2", "3", "4", "5", "6"]);
-    // Students' Source view shows line numbers too.
+    // Students read documents in Preview only (no Source toggle), numbered as well.
     await viewer.goto(url);
     await open(viewer, "notes.txt");
-    await viewer.getByRole("button", { name: "Source", exact: true }).click();
-    expect((await gutter(viewer)).numbers.slice(0, 3)).toEqual(["1", "2", "3"]);
+    await expect(viewer.locator(".markdown-switch")).toHaveCount(0);
+    await expect(viewer.getByRole("button", { name: "Source", exact: true })).toHaveCount(0);
+    await expect(viewer.locator(".markdown-preview .pv-line").first()).toHaveAttribute("data-line", "1");
     await open(viewer, "main.tf");
     expect((await gutter(viewer)).numbers.slice(0, 3)).toEqual(["1", "2", "3"]);
     await viewer.screenshot({ path: "test-results/line-numbers-student.png" });
@@ -197,10 +198,11 @@ test("students' read-only Preview shows live line numbers aligned with wrapped t
       "After the block.",
     ].join("\n");
     expect(await createFile(owner, "notes.txt", content)).toBe(201);
-    // Student: public link, Preview by default, no Source click, no settings change.
+    // Student: public link, always Preview (no view toggle), no settings change.
     await viewer.goto(url);
     await open(viewer, "notes.txt");
-    await expect(viewer.getByRole("button", { name: "Preview", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(viewer.locator(".markdown-preview")).toBeVisible();
+    await expect(viewer.locator(".markdown-switch")).toHaveCount(0);
     let lines = await studentLines();
     expect(lines.map((l) => l.line)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     expect(lines.map((l) => l.shown)).toEqual(["1", "2", "3", "4", "5", "6", "7", "8"]);
@@ -211,13 +213,23 @@ test("students' read-only Preview shows live line numbers aligned with wrapped t
     // One number per source line, even when it wraps over several rows.
     const wrapped = lines[1];
     expect(wrapped.height).toBeGreaterThan(wrapped.rowHeight * 2);
-    // Code lines are numbered individually and the block keeps its Copy code button.
-    expect(lines.slice(3, 7).map((l) => l.text)).toEqual([
-      expect.stringContaining("Bash / Shell"),
-      "echo one",
-      "echo two",
-      "",
-    ]);
+    // Code lines are numbered individually (gutter rows beside the scrolling code, one
+    // per line, aligned with it) and the block keeps its Copy code button.
+    expect(lines[3].text).toContain("Bash / Shell");
+    const codeRows = await viewer.locator(".inline-block").evaluate((block) => {
+      const rows = [...block.querySelectorAll(".code-line")].map((n) => ({
+        text: n.textContent,
+        top: Math.round(n.getBoundingClientRect().top),
+      }));
+      const numbers = [...block.querySelectorAll(".code-gutter .pv-line")].map((n) => ({
+        line: n.getAttribute("data-line"),
+        top: Math.round(n.getBoundingClientRect().top),
+      }));
+      return rows.map((row, i) => ({ ...row, line: numbers[i]?.line, numberTop: numbers[i]?.top }));
+    });
+    expect(codeRows.map((r) => `${r.line}:${r.text}`)).toEqual(["5:echo one", "6:echo two"]);
+    // Each code row sits on its gutter row (inline text boxes may start a few px lower).
+    for (const row of codeRows) expect(Math.abs(row.top - row.numberTop!)).toBeLessThanOrEqual(6);
     await viewer.locator(".inline-block").getByRole("button", { name: "Copy code" }).click();
     expect(
       (await viewer.evaluate(() => navigator.clipboard.readText())).replace(/\r\n/g, "\n"),

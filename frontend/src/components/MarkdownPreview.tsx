@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import {
   ArrowDown,
   ArrowUp,
@@ -12,6 +18,7 @@ import type * as Y from "yjs";
 import type { FileDoc } from "../lib";
 import {
   deleteSegment,
+  detectLanguage,
   fence,
   insertBlock,
   languageId,
@@ -19,11 +26,13 @@ import {
   moveSegment,
   parseMarkdown,
   replaceSegment,
+  setFenceLanguage,
   type CodeSegment,
   type Segment,
   type TextEdit,
 } from "../markdown";
 import CodeBlockDialog from "./CodeBlockDialog";
+import HighlightedLines, { languageAccent } from "./HighlightedCode";
 
 // Source text is rendered only as React text nodes; links are limited to safe schemes.
 function inline(text: string): ReactNode[] {
@@ -57,54 +66,59 @@ function inline(text: string): ReactNode[] {
 
 function InlineCodeBlock({
   segment,
-  dark,
   actions,
   firstLine,
   codeLines,
   closeLine,
+  onSetLanguage,
 }: {
   segment: CodeSegment;
-  dark: boolean;
   actions?: ReactNode;
   // 1-based source line of the opening fence, number of code lines, closing fence line.
   firstLine: number;
   codeLines: number;
   closeLine?: number;
+  // Editors only: writes a detected language into the block's opening fence.
+  onSetLanguage?: (language: string) => void;
 }) {
-  const [html, setHtml] = useState("");
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState("");
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  useEffect(() => {
-    let canceled = false;
-    setHtml("");
-    import("./CodeEditor")
-      .then((module) =>
-        // Monaco's colorizer escapes the code; the result contains only its own spans.
-        module.colorizeCode(segment.content, languageId(segment.language), dark),
-      )
-      .then((value) => {
-        if (!canceled) setHtml(value);
-      })
-      .catch(() => {});
-    return () => {
-      canceled = true;
-    };
-  }, [segment.content, segment.language, dark]);
   useEffect(() => () => clearTimeout(timer.current), []);
+  const detected = segment.language ? null : detectLanguage(segment.content);
+  const language = detected ?? languageId(segment.language);
   const plainLines = segment.content.split("\n");
-  const colored = html
-    .replace(/^\s*<div[^>]*>/, "")
-    .replace(/<\/div>\s*$/, "")
-    .split(/<br\s*\/?>/);
-  const lineHtml = html && colored.length === plainLines.length ? colored : null;
+  const lines = Array.from({ length: codeLines }, (_, k) => plainLines[k] ?? "");
   return (
-    <div className="markdown-code inline-block" data-language={segment.language}>
+    <div
+      className="markdown-code inline-block"
+      data-language={segment.language}
+      style={{ "--lang": languageAccent(language) } as CSSProperties}
+    >
       <div className="inline-block-header pv-line" data-line={firstLine}>
-        <span className="inline-block-label">
-          {languageLabel(segment.language)}
+        <span className="inline-block-title">
+          <span className="inline-block-label">
+            {detected ? languageLabel(detected) : languageLabel(segment.language)}
+          </span>
+          {detected && (
+            <span
+              className="inline-block-detected"
+              title="This block has no language set; colours are detected automatically."
+            >
+              auto
+            </span>
+          )}
         </span>
         <span className="inline-block-actions">
+          {detected && onSetLanguage && (
+            <button
+              className="inline-block-set"
+              title="Save this language in the document"
+              onClick={() => onSetLanguage(detected)}
+            >
+              Set as {languageLabel(detected)}
+            </button>
+          )}
           {actions}
           <button
             className="snippet-copy"
@@ -125,25 +139,20 @@ function InlineCodeBlock({
           </button>
         </span>
       </div>
-      <pre>
-        <code>
-          {Array.from({ length: codeLines }, (_, k) =>
-            // Monaco's colorizer joins lines with <br/>; each line gets its own number.
-            lineHtml?.[k] !== undefined ? (
-              <span
-                key={k}
-                className="pv-line pv-code-line"
-                data-line={firstLine + 1 + k}
-                dangerouslySetInnerHTML={{ __html: lineHtml[k] }}
-              />
-            ) : (
-              <span key={k} className="pv-line pv-code-line" data-line={firstLine + 1 + k}>
-                {plainLines[k]}
-              </span>
-            ),
-          )}
-        </code>
-      </pre>
+      <div className="code-body">
+        {/* Source line numbers sit in the document's number column, outside the scrolling
+            code, so long lines scroll sideways while every number stays visible. */}
+        <div className="code-gutter" aria-hidden="true">
+          {lines.map((_, k) => (
+            <div key={k} className="pv-line pv-code-line" data-line={firstLine + 1 + k} />
+          ))}
+        </div>
+        <pre tabIndex={0} aria-label={`${languageLabel(language)} code`}>
+          <code>
+            <HighlightedLines lines={lines} language={language} />
+          </code>
+        </pre>
+      </div>
       {closeLine !== undefined && (
         <div className="pv-line pv-fence-end" data-line={closeLine} />
       )}
@@ -177,14 +186,12 @@ function applyEdit(
 
 export default function MarkdownPreview({
   file,
-  dark,
   fontSize,
   canEdit = false,
   plain = false,
   notify,
 }: {
   file: FileDoc;
-  dark: boolean;
   fontSize: number;
   canEdit?: boolean;
   plain?: boolean;
@@ -249,10 +256,15 @@ export default function MarkdownPreview({
           <InlineCodeBlock
             key={key}
             segment={segment}
-            dark={dark}
             firstLine={first + 1}
             codeLines={closedFence(last) ? last - first - 1 : last - first}
             closeLine={closedFence(last) ? last + 1 : undefined}
+            onSetLanguage={
+              canEdit
+                ? (language) =>
+                    run(segment, (s, all, i) => setFenceLanguage(s, all[i], language))
+                : undefined
+            }
             actions={
               canEdit && (
                 <>

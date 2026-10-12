@@ -69,9 +69,6 @@
 .markdown-preview :not(pre) > code { font-family:Consolas,monospace; background:var(--raised); border:1px solid var(--border); border-radius:4px; padding:2px 5px; font-size:.9em; }
 .markdown-preview blockquote { color:var(--muted); border-left:3px solid var(--border); padding:6px 18px; margin:20px 0; }
 .markdown-preview hr { border:0; border-top:1px solid var(--border); margin:25px 0; }
-.markdown-code { border:1px solid var(--border); border-radius:8px; background:var(--surface); overflow:hidden; margin:20px 0; }
-.markdown-code > div { display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid var(--border); padding:7px 14px; color:var(--faint); font-size:11px; }
-.markdown-code pre { overflow:auto; padding:15px; margin:0; font:13px/1.8 Consolas,monospace; white-space:pre; }
 @media (max-width:1100px) { .workspace-back span { display:none; } .workspace-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 @media (max-width:650px) { .workspace-grid { grid-template-columns:1fr; } .dashboard-heading { align-items:flex-start; flex-wrap:wrap; } .dashboard-filters { flex-direction:column; } .hero-footnote { font-size:10px; gap:4px; } .activity-row { align-items:flex-start; } .workspace-back { padding:4px; } .workspace-brand { display:none !important; } .markdown-switch button { padding:4px; } .editor-breadcrumb:has(.markdown-switch) > span:first-child { display:none; } }
 .access-badge {
@@ -1493,7 +1490,10 @@ option {
   padding: 17px 18px;
   font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
   line-height: 1.75;
-  color: var(--text);
+  /* Same dark code theme as lesson code blocks (token colours are tuned for it). */
+  color: #d4dce8;
+  background: #0e131c;
+  --code-guide: #ffffff14;
   overflow-x: auto;
   white-space: pre;
   tab-size: 2;
@@ -2179,10 +2179,81 @@ span.doc-block-language { display:inline-block; }
 .markdown-preview.numbered .markdown-code { margin: 0; overflow: visible; }
 .markdown-preview.numbered .inline-block-header.pv-line { --pv-indent: 1px; }
 .markdown-preview.numbered .inline-block-header.pv-line::before { top: 50%; transform: translateY(-50%); line-height: 1; }
-.markdown-preview.numbered .markdown-code pre { overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; padding-bottom: 4px; }
-.markdown-preview.numbered .pv-code-line { --pv-indent: 16px; min-height: 1lh; }
-.markdown-preview.numbered .pv-fence-end { --pv-indent: 1px; height: 14px; }
+/* Gutter rows are zero-width boxes at the code's left edge; their numbers land in the
+   same column as the prose numbers, one row per code line (code never wraps). */
+.markdown-preview.numbered .code-gutter { position: absolute; top: var(--code-pad-y); left: 0; width: 0; }
+.markdown-preview.numbered .pv-code-line { --pv-indent: 1px; height: 1lh; }
+.markdown-preview.numbered .pv-fence-end { --pv-indent: 1px; height: 10px; }
 .markdown-preview.numbered .pv-fence-end::before { top: 50%; transform: translateY(-50%); line-height: 1; }
+
+/* ---- Code blocks: dark VS Code-style theme in every app theme ---- */
+.markdown-code {
+  --code-bg: #0e131c; --code-head: #151b27; --code-border: #263041; --code-text: #d4dce8;
+  --code-muted: #8a97ab; --code-guide: #ffffff14; --code-pad-y: 14px;
+  --lang: #94a3b8;
+  /* Block, not Tailwind's `.inline-block` utility (also on this element), which made
+     blocks shrink to their content: narrow for short code, page-wide for long lines. */
+  display: block; min-width: 0;
+  border: 1px solid var(--code-border); border-radius: 10px; background: var(--code-bg);
+  color: var(--code-text); margin: 20px 0; overflow: hidden;
+  box-shadow: 0 1px 0 #ffffff06 inset, 0 6px 18px -12px #0009;
+}
+/* Code fills the whole document or preview width; prose keeps its reading measure. */
+.markdown-preview > .markdown-code { max-width: none; }
+.markdown-code .inline-block-header {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  min-height: 38px; padding: 5px 8px 5px 14px; background: var(--code-head);
+  border-bottom: 1px solid var(--code-border); border-radius: 9px 9px 0 0;
+  font: 12px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.inline-block-title { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.inline-block-label { display: inline-flex; align-items: center; gap: 7px; color: var(--lang); font-weight: 600; letter-spacing: .2px; white-space: nowrap; }
+.inline-block-label::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--lang); box-shadow: 0 0 0 3px color-mix(in srgb, var(--lang) 22%, transparent); flex-shrink: 0; }
+.inline-block-detected { font-size: 10px; text-transform: uppercase; letter-spacing: .6px; color: var(--code-muted); border: 1px solid var(--code-border); border-radius: 4px; padding: 0 5px; line-height: 16px; }
+.markdown-code .inline-block-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.markdown-code .inline-block-actions .icon-button { color: var(--code-muted); }
+.markdown-code .inline-block-actions .icon-button:hover:not(:disabled) { color: var(--code-text); background: #ffffff12; }
+.inline-block-set { font: inherit; font-size: 11px; color: var(--lang); background: transparent; border: 1px dashed color-mix(in srgb, var(--lang) 55%, transparent); border-radius: 5px; padding: 3px 8px; cursor: pointer; white-space: nowrap; }
+.inline-block-set:hover { background: color-mix(in srgb, var(--lang) 12%, transparent); }
+.markdown-code .snippet-copy {
+  display: inline-flex; align-items: center; gap: 6px; font: 600 12px/1 system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #e6ecf5; background: #ffffff0f; border: 1px solid #ffffff24; border-radius: 6px; padding: 6px 10px; cursor: pointer; white-space: nowrap;
+}
+.markdown-code .snippet-copy:hover { background: #ffffff1c; border-color: #ffffff3a; }
+.markdown-code .snippet-copy:focus-visible { outline: 2px solid var(--lang); outline-offset: 1px; }
+.markdown-code .code-body {
+  position: relative;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: .875em; line-height: 1.7; font-variant-ligatures: none;
+}
+.markdown-code pre {
+  margin: 0; padding: var(--code-pad-y) 18px; overflow-x: auto; overflow-y: hidden;
+  white-space: pre; overflow-wrap: normal; word-break: normal; tab-size: 4;
+  font: inherit; color: var(--code-text); scrollbar-color: #ffffff2e transparent;
+}
+.markdown-code pre:focus-visible { outline: 2px solid var(--lang); outline-offset: -2px; }
+.markdown-code pre code { font: inherit; background: none; border: 0; padding: 0; }
+.markdown-code [role="alert"] { margin: 0; padding: 6px 14px; font-size: 12px; color: #fca5a5; border-top: 1px solid var(--code-border); }
+/* Indentation guides: one per indentation level, drawn on the whitespace itself. */
+.indent-guide { display: inline-block; height: 1lh; vertical-align: top; box-shadow: inset 1px 0 0 var(--code-guide, #8882); }
+/* Token colours (VS Code Dark+ inspired). */
+.tk-comment { color: #6a9955; font-style: italic; }
+.tk-key { color: #9cdcfe; }
+.tk-string { color: #ce9178; }
+.tk-escape { color: #d7ba7d; }
+.tk-number { color: #b5cea8; }
+.tk-keyword { color: #569cd6; }
+.tk-type { color: #4ec9b0; }
+.tk-tag { color: #569cd6; }
+.tk-variable { color: #9cdcfe; }
+.tk-function { color: #dcdcaa; }
+.tk-regexp { color: #d16969; }
+.tk-punct { color: #9aa6b8; }
+@media (max-width: 650px) {
+  .markdown-code .inline-block-header { padding-left: 10px; }
+  .markdown-code .snippet-copy { padding: 6px 8px; }
+  .markdown-code pre { padding-inline: 12px; }
+}
 
 /* ---- Kodelumi brand ---- */
 :root {

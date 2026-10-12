@@ -624,7 +624,7 @@ function Workspace({
         ? "blocks"
         : "editor",
     ),
-    [markdownMode, setMarkdownMode] = useState<"edit" | "split" | "preview">(
+    [chosenMode, setMarkdownMode] = useState<"edit" | "split" | "preview">(
       "edit",
     ),
     [blockDialog, setBlockDialog] = useState<
@@ -680,6 +680,8 @@ function Workspace({
     : undefined;
   const isOwner = room?.access === "owner";
   const isEditor = isOwner || room?.access === "editor";
+  // Viewers always read documents in the formatted Preview; only editors switch views.
+  const markdownMode = isEditor ? chosenMode : "preview";
   // Owners manage the workspace; unclaimed v1 workspaces keep link-based management.
   const canManage = isOwner || (isEditor && !room?.owned);
   const tabsKey = `devshare.tabs.${id}.${folder ?? "root"}`;
@@ -1678,28 +1680,28 @@ function Workspace({
                           <Code2 size={14} /> Insert Code Block
                         </button>
                       )}
-                      <div className="markdown-switch" aria-label="Markdown view">
-                        <button
-                          aria-pressed={markdownMode === "edit"}
-                          onClick={() => setMarkdownMode("edit")}
-                        >
-                          {isEditor ? "Edit" : "Source"}
-                        </button>
-                        {isEditor && (
+                      {isEditor && (
+                        <div className="markdown-switch" aria-label="Markdown view">
+                          <button
+                            aria-pressed={markdownMode === "edit"}
+                            onClick={() => setMarkdownMode("edit")}
+                          >
+                            Edit
+                          </button>
                           <button
                             aria-pressed={markdownMode === "split"}
                             onClick={() => setMarkdownMode("split")}
                           >
                             <PanelRight size={13} /> Split
                           </button>
-                        )}
-                        <button
-                          aria-pressed={markdownMode === "preview"}
-                          onClick={() => setMarkdownMode("preview")}
-                        >
-                          Preview
-                        </button>
-                      </div>
+                          <button
+                            aria-pressed={markdownMode === "preview"}
+                            onClick={() => setMarkdownMode("preview")}
+                          >
+                            Preview
+                          </button>
+                        </div>
+                      )}
                     </>
                   )}
                   {isEditor && (
@@ -1774,16 +1776,19 @@ function Workspace({
                       <Trash2 size={14} />
                     </button>
                   )}
-                  <button
-                    className="icon-button"
-                    aria-label="Find in file"
-                    onClick={() =>
-                      editorRef.current?.getAction("actions.find")?.run()
-                    }
-                    title="Find (Ctrl / ⌘ F)"
-                  >
-                    <Search size={15} />
-                  </button>
+                  {/* Preview has no editor to search; the browser's own find works there. */}
+                  {!(isDocumentLanguage(current?.language) && markdownMode === "preview") && (
+                    <button
+                      className="icon-button"
+                      aria-label="Find in file"
+                      onClick={() =>
+                        editorRef.current?.getAction("actions.find")?.run()
+                      }
+                      title="Find (Ctrl / ⌘ F)"
+                    >
+                      <Search size={15} />
+                    </button>
+                  )}
                   <button
                     className="icon-button"
                     aria-label="Download file"
@@ -1838,7 +1843,6 @@ function Workspace({
                   <MarkdownPreview
                     key={current.id}
                     file={current}
-                    dark={dark}
                     fontSize={settings.fontSize}
                     canEdit={isEditor && connected}
                     plain={current.language === "plaintext"}
@@ -1870,7 +1874,6 @@ function Workspace({
                         <MarkdownPreview
                           key={"preview-" + current.id}
                           file={current}
-                          dark={dark}
                           fontSize={settings.fontSize}
                           canEdit={isEditor && connected}
                           plain={current.language === "plaintext"}

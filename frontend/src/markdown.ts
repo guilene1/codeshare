@@ -17,18 +17,37 @@ export type Segment =
   | (Base & { type: "list"; ordered: boolean; items: string[] })
   | (Base & { type: "paragraph"; text: string });
 
-const aliases: Record<string, string> = {
+export const aliases: Record<string, string> = {
   bash: "shell",
   sh: "shell",
   zsh: "shell",
   console: "shell",
+  shellsession: "shell",
   terraform: "hcl",
   tf: "hcl",
+  tfvars: "hcl",
   js: "javascript",
+  jsx: "javascript",
+  node: "javascript",
   ts: "typescript",
+  tsx: "typescript",
   py: "python",
+  python3: "python",
   yml: "yaml",
+  k8s: "yaml",
+  kubernetes: "yaml",
+  helm: "yaml",
   docker: "dockerfile",
+  containerfile: "dockerfile",
+  jsonc: "json",
+  golang: "go",
+  ps1: "powershell",
+  pwsh: "powershell",
+  toml: "ini",
+  env: "ini",
+  dotenv: "ini",
+  properties: "ini",
+  rb: "ruby",
   md: "markdown",
   text: "plaintext",
   txt: "plaintext",
@@ -42,6 +61,59 @@ export function languageId(info: string) {
 export function languageLabel(info: string) {
   if (!info) return "Plain text";
   return languages.find(([id]) => id === languageId(info))?.[1] ?? info;
+}
+
+// Best guess for a block whose fence names no language. It only chooses colours: the
+// document is never changed, and anything ambiguous stays plain text.
+export function detectLanguage(content: string): string | null {
+  const text = content.trim();
+  if (!text) return null;
+  const firstLine = text.split("\n")[0];
+  if (/^#!.*\b(ba|z|k)?sh\b/.test(firstLine)) return "shell";
+  if (/^#!.*\bpython/.test(firstLine)) return "python";
+  if (/^[[{]/.test(text))
+    try {
+      JSON.parse(text);
+      return "json";
+    } catch {
+      /* Not JSON; keep looking. */
+    }
+  const code = text
+    .split("\n")
+    .map((line) => line.replace(/\r$/, ""))
+    .filter((line) => line.trim() && !/^\s*(#|\/\/)/.test(line));
+  if (!code.length) return null;
+  const share = (pattern: RegExp) =>
+    code.filter((line) => pattern.test(line)).length / code.length;
+  if (/^apiVersion:\s*\S/m.test(text) && /^kind:\s*\S/m.test(text)) return "yaml";
+  if (
+    /^(FROM|ARG)\s+\S/i.test(code[0]) &&
+    share(
+      /^(FROM|RUN|CMD|COPY|ADD|ENV|ARG|EXPOSE|WORKDIR|ENTRYPOINT|USER|LABEL|VOLUME|HEALTHCHECK|SHELL|ONBUILD|STOPSIGNAL)\s|^\s+\S/i,
+    ) >= 0.8
+  )
+    return "dockerfile";
+  if (/^\s*(resource|data|provider|variable|output|module|terraform|locals)\b[^\n{]*\{\s*$/m.test(text))
+    return "hcl";
+  const yamlKey = /^\s*(-\s+)?("[^"]*"|'[^']*'|[\w./-]+)\s*:(\s|$)/;
+  if (
+    code.filter((line) => yamlKey.test(line)).length >= 2 &&
+    share(/^\s*(-\s+)?("[^"]*"|'[^']*'|[\w./-]+)\s*:(\s|$)|^\s*-(\s|$)|^\s+\S/) >= 0.8 &&
+    !code.some((line) => /[;{]\s*$/.test(line))
+  )
+    return "yaml";
+  if (
+    /^\s*(def\s+\w+\s*\(|class\s+\w+\s*[(:]|import\s+\w+|from\s+[\w.]+\s+import\s)/m.test(text) &&
+    !code.some((line) => /[;{]\s*$/.test(line))
+  )
+    return "python";
+  if (
+    share(
+      /^\s*(\$\s+)?(sudo\s+)?(kubectl|docker|podman|terraform|helm|aws|az|gcloud|git|npm|npx|yarn|pnpm|pip3?|cd|ls|cat|echo|export|curl|wget|ssh|scp|chmod|chown|mkdir|rm|cp|mv|apt(-get)?|yum|dnf|brew|systemctl|journalctl|make|minikube|kind|eksctl|ansible(-playbook)?|vagrant|packer|openssl|grep|tail|source|tar|unzip|touch|whoami)\b/,
+    ) >= 0.6
+  )
+    return "shell";
+  return null;
 }
 
 // `plain` (Plain Text documents): only fenced code blocks are special; all other text
@@ -152,6 +224,22 @@ export type TextEdit = { start: number; remove: number; insert: string };
 export function replaceSegment(segment: Segment, text: string): TextEdit {
   return { start: segment.start, remove: segment.end - segment.start, insert: text };
 }
+// Rewrites only the opening fence line's language; the code itself is untouched.
+export function setFenceLanguage(
+  source: string,
+  segment: Segment,
+  language: string,
+): TextEdit | null {
+  const end = source.indexOf("\n", segment.start);
+  const opening = source.slice(segment.start, end < 0 ? source.length : end).replace(/\r$/, "");
+  const marks = /^(\s*)(`{3,}|~{3,})/.exec(opening);
+  if (!marks) return null;
+  return {
+    start: segment.start,
+    remove: opening.length,
+    insert: marks[1] + marks[2] + (language === "plaintext" ? "" : language),
+  };
+}
 // Swaps a block with its neighbouring element, keeping the whitespace between them.
 export function moveSegment(
   source: string,
@@ -215,7 +303,7 @@ export function fenceBlocks(lines: string[]): FenceBlock[] {
       const open = FENCE.exec(line);
       if (open) current = { open: index, close: -1, info: open[3], marks: open[2] };
     } else if (
-      new RegExp(`^\s*${current.marks[0] === "`" ? "`" : "~"}{${current.marks.length},}\s*$`).test(line)
+      new RegExp(`^\\s*${current.marks[0] === "`" ? "`" : "~"}{${current.marks.length},}\\s*$`).test(line)
     ) {
       current.close = index;
       blocks.push(current);

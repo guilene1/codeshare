@@ -11,6 +11,10 @@ export const languages = [
   ["json", "JSON", "json"],
   ["dockerfile", "Dockerfile", ""],
   ["sql", "SQL", "sql"],
+  ["powershell", "PowerShell", "ps1"],
+  ["xml", "XML", "xml"],
+  ["ini", "INI / TOML", "ini"],
+  ["ruby", "Ruby", "rb"],
   ["markdown", "Markdown", "md"],
   ["html", "HTML", "html"],
   ["css", "CSS", "css"],
@@ -18,8 +22,18 @@ export const languages = [
 ];
 export function inferLanguage(name: string) {
   if (name === "Dockerfile") return "dockerfile";
+  const extension = name.split(".").pop()!;
+  const extra: Record<string, string> = {
+    yml: "yaml",
+    tfvars: "hcl",
+    hcl: "hcl",
+    bash: "shell",
+    toml: "ini",
+  };
   return (
-    languages.find((l) => l[2] === name.split(".").pop())?.[0] ?? "plaintext"
+    extra[extension] ??
+    languages.find((l) => l[2] === extension)?.[0] ??
+    "plaintext"
   );
 }
 export type FileDoc = {
