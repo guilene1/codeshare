@@ -47,11 +47,13 @@ async function openLesson(page: Page) {
   await page.locator(".sidebar").getByRole("button", { name: "lesson.md", exact: true }).click();
   await expect(page.locator(".markdown-preview .inline-block")).toHaveCount(1);
 }
-// No built-in Copy or Download control anywhere: toolbar, code blocks, image viewer.
-async function expectNoCopyOrDownload(page: Page) {
+// View-only: each code block keeps its Copy code button (students copy commands), but there
+// is no file-level Copy or Download, workspace link copying, or image "Original" link.
+async function expectViewOnlyControls(page: Page) {
   for (const label of ["Copy file", "Download file", "Copy workspace link", "Share"])
     await expect(page.getByRole("button", { name: label, exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: /Copy/ })).toHaveCount(0);
+  await expect(page.locator(".inline-block").getByRole("button", { name: "Copy code" })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: /Copy/ })).toHaveCount(1);
   await page.getByRole("button", { name: /Open image full screen/ }).click();
   await expect(page.getByRole("button", { name: "Zoom in" })).toBeVisible();
   await expect(page.getByRole("link", { name: /Original/ })).toHaveCount(0);
@@ -125,7 +127,7 @@ test("sharing: Viewer and Editor accounts, Shared with Me, view-only controls, a
     await owner.screenshot({ path: "test-results/sharing-owner-people.png" });
     await owner.getByRole("button", { name: "Close dialog" }).click();
 
-    // Viewer share: Shared with Me lists it; opening it is view-only without copy controls.
+    // Viewer share: Shared with Me lists it; opening it is view-only, code blocks copyable.
     await vera.reload();
     const veraShared = vera.getByRole("region", { name: "Shared with Me" });
     const card = veraShared.getByRole("article", { name: "Shared Kubernetes lab" });
@@ -135,7 +137,7 @@ test("sharing: Viewer and Editor accounts, Shared with Me, view-only controls, a
     await card.getByRole("button", { name: /Open/ }).click();
     await expect(vera.getByLabel("Workspace access")).toContainText("View Only");
     await openLesson(vera);
-    await expectNoCopyOrDownload(vera);
+    await expectViewOnlyControls(vera);
     for (const label of ["Edit code block", "Insert Code Block", "New file", "Rename file", "Delete file"])
       await expect(vera.getByRole("button", { name: label, exact: true })).toHaveCount(0);
 
@@ -144,7 +146,7 @@ test("sharing: Viewer and Editor accounts, Shared with Me, view-only controls, a
     await expect(student.getByLabel("Workspace access")).toContainText("View Only");
     await expect(student.getByLabel("Your name")).toHaveCount(0);
     await openLesson(student);
-    await expectNoCopyOrDownload(student);
+    await expectViewOnlyControls(student);
     await student.screenshot({ path: "test-results/sharing-student-view-only.png" });
 
     // Editor share: edits content and keeps Copy, but cannot manage the workspace.

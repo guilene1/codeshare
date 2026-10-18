@@ -94,12 +94,9 @@ function InlineCodeBlock({
   codeLines,
   closeLine,
   onSetLanguage,
-  canCopy,
 }: {
   segment: CodeSegment;
   actions?: ReactNode;
-  // View-only readers get no built-in Copy control.
-  canCopy: boolean;
   // 1-based source line of the opening fence, number of code lines, closing fence line.
   firstLine: number;
   codeLines: number;
@@ -146,25 +143,24 @@ function InlineCodeBlock({
             </button>
           )}
           {actions}
-          {canCopy && (
-            <button
-              className="snippet-copy"
-              onClick={async () => {
-                try {
-                  await navigator.clipboard.writeText(segment.content);
-                  setCopied(true);
-                  setError("");
-                  clearTimeout(timer.current);
-                  timer.current = setTimeout(() => setCopied(false), 2000);
-                } catch {
-                  setError("Select the code and press Ctrl / ⌘ C.");
-                }
-              }}
-            >
-              {copied ? <Check size={14} /> : <Copy size={14} />}
-              {copied ? "Copied!" : "Copy code"}
-            </button>
-          )}
+          {/* Every reader, including view-only students, can copy a block. */}
+          <button
+            className="snippet-copy"
+            onClick={async () => {
+              try {
+                await navigator.clipboard.writeText(segment.content);
+                setCopied(true);
+                setError("");
+                clearTimeout(timer.current);
+                timer.current = setTimeout(() => setCopied(false), 2000);
+              } catch {
+                setError("Select the code and press Ctrl / ⌘ C.");
+              }
+            }}
+          >
+            {copied ? <Check size={14} /> : <Copy size={14} />}
+            {copied ? "Copied!" : "Copy code"}
+          </button>
         </span>
       </div>
       <div className="code-body">
@@ -325,7 +321,7 @@ export default function MarkdownPreview({
   file,
   fontSize,
   canEdit = false,
-  canCopy = false,
+  canOpenOriginal = false,
   plain = false,
   notify,
   onImages,
@@ -333,8 +329,8 @@ export default function MarkdownPreview({
   file: FileDoc;
   fontSize: number;
   canEdit?: boolean;
-  // Owners and editors: Copy code buttons and the image viewer's "Open original".
-  canCopy?: boolean;
+  // Owners and editors: the image viewer's "Open original" (effectively a download).
+  canOpenOriginal?: boolean;
   plain?: boolean;
   notify?: (message: string) => void;
   // Editors in Preview: images pasted or dropped here are added at the end.
@@ -422,7 +418,6 @@ export default function MarkdownPreview({
             firstLine={first + 1}
             codeLines={closedFence(last) ? last - first - 1 : last - first}
             closeLine={closedFence(last) ? last + 1 : undefined}
-            canCopy={canCopy}
             onSetLanguage={
               canEdit
                 ? (language) =>
@@ -491,7 +486,7 @@ export default function MarkdownPreview({
             key={key}
             segment={segment}
             line={first + 1}
-            canOpenOriginal={canCopy}
+            canOpenOriginal={canOpenOriginal}
             onResize={
               canEdit
                 ? (width) =>

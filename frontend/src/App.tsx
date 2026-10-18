@@ -1672,7 +1672,6 @@ function Workspace({
               onDraftConsumed={() => {}}
               blocks={blocks}
               canEdit={false}
-              canCopy={isEditor}
               connected={connected}
               dark={dark}
               fontSize={settings.fontSize}
@@ -1952,7 +1951,7 @@ function Workspace({
                     file={current}
                     fontSize={settings.fontSize}
                     canEdit={isEditor && connected}
-                    canCopy={isEditor}
+                    canOpenOriginal={isEditor}
                     plain={current.language === "plaintext"}
                     onImages={isEditor && connected ? addImages : undefined}
                     notify={notify}
@@ -1986,7 +1985,7 @@ function Workspace({
                           file={current}
                           fontSize={settings.fontSize}
                           canEdit={isEditor && connected}
-                          canCopy={isEditor}
+                          canOpenOriginal={isEditor}
                           plain={current.language === "plaintext"}
                           onImages={isEditor && connected ? addImages : undefined}
                           notify={notify}

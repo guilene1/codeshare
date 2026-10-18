@@ -208,15 +208,12 @@ class BlockWidget implements monaco.editor.IContentWidget {
       select.addEventListener("change", () => this.setLanguage(select.value));
       this.label = select;
     }
-    this.node.append(this.label);
-    // View-only readers get no built-in Copy control; editors and owners keep it.
-    if (!readOnly) {
-      this.copyButton.type = "button";
-      this.copyButton.className = "doc-block-copy";
-      this.copyButton.textContent = "Copy code";
-      this.copyButton.addEventListener("click", () => void this.copy());
-      this.node.append(this.copyButton);
-    }
+    // Every reader, including view-only students, can copy a block.
+    this.copyButton.type = "button";
+    this.copyButton.className = "doc-block-copy";
+    this.copyButton.textContent = "Copy code";
+    this.copyButton.addEventListener("click", () => void this.copy());
+    this.node.append(this.label, this.copyButton);
   }
   getId() {
     return "devshare.codeBlock." + this.index;
