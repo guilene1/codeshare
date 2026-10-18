@@ -1,7 +1,7 @@
 {
   "name": "Kodelumi",
   "short_name": "Kodelumi",
-  "description": "Code • Learn • Create • Share — real-time coding, documentation and collaboration with secure read-only links.",
+  "description": "Real-time coding, documentation and collaboration with secure read-only links.",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0d1119",

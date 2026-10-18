@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import {
   Copy,
   Eye,
@@ -8,11 +8,147 @@ import {
   LockKeyhole,
   RefreshCw,
   ShieldOff,
+  UserPlus,
   Users,
+  X,
 } from "lucide-react";
 import Modal from "./Modal";
 import { api } from "../lib";
 import { BRAND } from "../brand";
+import type { ShareRole } from "../workspaces";
+
+type Share = {
+  userId: string;
+  displayName: string;
+  email: string;
+  role: ShareRole;
+};
+
+// Owners add existing registered users so the workspace appears in their Shared with Me.
+// Students never need this: the viewer link above works without an account.
+function PeopleAccess({ id }: { id: string }) {
+  const [shares, setShares] = useState<Share[] | null>(null);
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState<ShareRole>("viewer");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    api<{ shares: Share[] }>(`/rooms/${id}/shares`)
+      .then((result) => setShares(result.shares))
+      .catch((e) => setError((e as Error).message));
+  }, [id]);
+  async function change(
+    run: () => Promise<{ shares: Share[] }>,
+  ): Promise<boolean> {
+    setBusy(true);
+    setError("");
+    try {
+      setShares((await run()).shares);
+      return true;
+    } catch (e) {
+      setError((e as Error).message);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function add(event: FormEvent) {
+    event.preventDefault();
+    if (
+      await change(() =>
+        api(`/rooms/${id}/shares`, "POST", { email: email.trim(), role }),
+      )
+    )
+      setEmail("");
+  }
+  return (
+    <section className="access-share-section people-access" aria-label="People with access">
+      <h3>
+        <UserPlus size={16} />
+        People with access
+      </h3>
+      <p>
+        Add someone who already has a {BRAND} account. The workspace appears in
+        their Shared with Me list.
+      </p>
+      <form className="people-add" onSubmit={(e) => void add(e)}>
+        <input
+          type="email"
+          required
+          aria-label="Email address"
+          placeholder="name@example.com"
+          maxLength={254}
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+        />
+        <select
+          aria-label="Permission"
+          value={role}
+          onChange={(e) => setRole(e.target.value as ShareRole)}
+        >
+          <option value="viewer">Viewer</option>
+          <option value="editor">Editor</option>
+        </select>
+        <button className="button primary" disabled={busy || !email.trim()}>
+          {busy && <Loader2 size={15} className="spin" />} Share
+        </button>
+      </form>
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+      {shares === null ? (
+        !error && (
+          <p className="fine-print">
+            <Loader2 size={14} className="spin" /> Loading…
+          </p>
+        )
+      ) : !shares.length ? (
+        <p className="fine-print">Not shared with any accounts yet.</p>
+      ) : (
+        <ul className="people-list">
+          {shares.map((share) => (
+            <li key={share.userId}>
+              <span>
+                <strong>{share.displayName}</strong>
+                <small>{share.email}</small>
+              </span>
+              <select
+                aria-label={`Permission for ${share.displayName}`}
+                value={share.role}
+                disabled={busy}
+                onChange={(e) =>
+                  void change(() =>
+                    api(`/rooms/${id}/shares/${share.userId}`, "PATCH", {
+                      role: e.target.value,
+                    }),
+                  )
+                }
+              >
+                <option value="viewer">Viewer</option>
+                <option value="editor">Editor</option>
+              </select>
+              <button
+                className="icon-button"
+                aria-label={`Remove ${share.displayName}`}
+                title="Remove access"
+                disabled={busy}
+                onClick={() =>
+                  void change(() =>
+                    api(`/rooms/${id}/shares/${share.userId}`, "DELETE"),
+                  )
+                }
+              >
+                <X size={15} />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
 export default function AccessShare({
   id,
   name,
@@ -70,15 +206,15 @@ export default function AccessShare({
   return (
     <Modal title={"Share “" + name + "”"} onClose={onClose}>
       <p className="modal-description">
-        Bring your class into the workspace. Students can view and copy every
-        example without an account.
+        Bring your class into the workspace. Students open the link right away,
+        with no account or sign-in.
       </p>
       <section className="access-share-section">
         <h3>
           <Users size={16} />
           Students · View only
         </h3>
-        <p>Anyone with this link can follow along, select, and copy code.</p>
+        <p>Anyone with this link can follow along live. Share it with your whole class.</p>
         <label className="field">
           Student link
           <div className="copy-field">
@@ -114,6 +250,7 @@ export default function AccessShare({
           </button>
         </div>
       </section>
+      {owner && <PeopleAccess id={id} />}
       {(owner || editorToken) && (
         <section className="access-share-section private-access">
           <h3>

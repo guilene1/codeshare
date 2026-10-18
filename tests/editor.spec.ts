@@ -154,7 +154,7 @@ test("students' read-only Preview shows live line numbers aligned with wrapped t
 }) => {
   test.setTimeout(120_000);
   const instructor = await browser.newContext(),
-    student = await browser.newContext({ permissions: ["clipboard-read", "clipboard-write"] });
+    student = await browser.newContext();
   const owner = await instructor.newPage(),
     viewer = await student.newPage();
   const errors: string[] = [];
@@ -214,7 +214,7 @@ test("students' read-only Preview shows live line numbers aligned with wrapped t
     const wrapped = lines[1];
     expect(wrapped.height).toBeGreaterThan(wrapped.rowHeight * 2);
     // Code lines are numbered individually (gutter rows beside the scrolling code, one
-    // per line, aligned with it) and the block keeps its Copy code button.
+    // per line, aligned with it).
     expect(lines[3].text).toContain("Bash / Shell");
     const codeRows = await viewer.locator(".inline-block").evaluate((block) => {
       const rows = [...block.querySelectorAll(".code-line")].map((n) => ({
@@ -230,10 +230,8 @@ test("students' read-only Preview shows live line numbers aligned with wrapped t
     expect(codeRows.map((r) => `${r.line}:${r.text}`)).toEqual(["5:echo one", "6:echo two"]);
     // Each code row sits on its gutter row (inline text boxes may start a few px lower).
     for (const row of codeRows) expect(Math.abs(row.top - row.numberTop!)).toBeLessThanOrEqual(6);
-    await viewer.locator(".inline-block").getByRole("button", { name: "Copy code" }).click();
-    expect(
-      (await viewer.evaluate(() => navigator.clipboard.readText())).replace(/\r\n/g, "\n"),
-    ).toBe("echo one\necho two");
+    // View-only: the block has no built-in Copy control.
+    await expect(viewer.locator(".inline-block").getByRole("button", { name: /Copy/ })).toHaveCount(0);
     await viewer.screenshot({ path: "test-results/preview-line-numbers-dark.png" });
     // Strictly read-only: no editing controls and nothing editable.
     for (const label of ["Edit code block", "Insert Code Block", "Add code block", "Edit"])

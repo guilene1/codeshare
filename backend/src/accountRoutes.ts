@@ -307,4 +307,42 @@ export function accountRoutes(
         })),
     });
   });
+  // Workspaces other owners explicitly shared with this account. Never includes editor
+  // credentials or owner-only details.
+  app.get("/api/me/shared", requireSession, (_req, res) => {
+    const session = res.locals.session as Session;
+    res.json({
+      workspaces: rooms.db
+        .prepare(
+          "SELECT r.id,r.name,r.description,r.updated_at,s.role,s.created_at AS shared_at,u.display_name AS owner_name FROM workspace_shares s JOIN rooms r ON r.id=s.workspace_id LEFT JOIN users u ON u.id=r.owner_id WHERE s.user_id=? ORDER BY r.updated_at DESC",
+        )
+        .all(session.user.id)
+        .map((row) => ({
+          id: row.id as string,
+          name: row.name,
+          description: row.description,
+          updated_at: row.updated_at,
+          shared_at: row.shared_at,
+          role: row.role,
+          ownerName: row.owner_name ?? "",
+        })),
+    });
+  });
+  // A recipient can remove a shared workspace from their own list.
+  app.delete("/api/me/shared/:workspaceId", requireSession, (req, res) => {
+    const session = res.locals.session as Session;
+    const workspaceId = String(req.params.workspaceId);
+    const removed = rooms.db
+      .prepare("DELETE FROM workspace_shares WHERE workspace_id=? AND user_id=?")
+      .run(workspaceId, session.user.id).changes;
+    if (removed) {
+      rooms.disconnect(
+        (auth) =>
+          auth.userId === session.user.id && auth.workspaceId === workspaceId,
+        "You left this shared workspace",
+      );
+      rooms.record(workspaceId, "share.left", session.user.displayName);
+    }
+    res.json({ ok: true });
+  });
 }

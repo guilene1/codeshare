@@ -18,7 +18,7 @@ const blockTexts = (page: Page) =>
     ),
   );
 
-test("lesson documents show inline code blocks with Copy; instructors insert, edit, move and delete them; students stay read-only", async ({
+test("lesson documents show inline code blocks; owners copy, insert, edit, move and delete them; students stay read-only", async ({
   browser,
 }) => {
   test.setTimeout(120_000);
@@ -90,7 +90,7 @@ test("lesson documents show inline code blocks with Copy; instructors insert, ed
     ]);
     await owner.screenshot({ path: "test-results/lesson-instructor-dark.png" });
 
-    // Students: no account, preview by default, Copy on every block, no editing.
+    // Students: no account, preview by default, no Copy controls, no editing.
     await viewer.goto(url);
     await expect(viewer.getByLabel("Workspace access")).toContainText("View Only");
     await openFromExplorer(viewer, "lesson.md");
@@ -104,17 +104,19 @@ test("lesson documents show inline code blocks with Copy; instructors insert, ed
       "Add code block",
     ])
       await expect(viewer.getByRole("button", { name: label })).toHaveCount(0);
+    // View-only students get no built-in Copy control; the owner keeps one per block.
+    await expect(viewer.locator(".inline-block").getByRole("button", { name: /Copy/ })).toHaveCount(0);
     for (const [index, command] of [
       "terraform init",
       "terraform plan",
       "terraform apply",
     ].entries()) {
-      await viewer
+      await owner
         .locator(".inline-block")
         .nth(index)
         .getByRole("button", { name: "Copy code", exact: true })
         .click();
-      expect(await viewer.evaluate(() => navigator.clipboard.readText())).toBe(command);
+      expect(await owner.evaluate(() => navigator.clipboard.readText())).toBe(command);
     }
     await viewer.screenshot({ path: "test-results/lesson-student-dark.png" });
 
@@ -320,9 +322,7 @@ test("typing ``` in a Markdown lesson creates a ChatGPT-style code block with it
   const instructor = await browser.newContext({
     permissions: ["clipboard-read", "clipboard-write"],
   });
-  const student = await browser.newContext({
-    permissions: ["clipboard-read", "clipboard-write"],
-  });
+  const student = await browser.newContext();
   const owner = await instructor.newPage(),
     viewer = await student.newPage();
   const errors: string[] = [];
@@ -382,17 +382,13 @@ test("typing ``` in a Markdown lesson creates a ChatGPT-style code block with it
     await owner.screenshot({ path: "test-results/backtick-lesson-split.png" });
     // No separate Code Blocks section exists.
     await expect(owner.getByRole("button", { name: /Code Blocks|Legacy snippets/ })).toHaveCount(0);
-    // Students: rendered read-only lesson with the same Copy code button.
+    // Students: rendered read-only lesson without the built-in Copy control.
     await viewer.goto(url);
     await viewer.locator(".sidebar").getByRole("button", { name: "lesson.md", exact: true }).click();
     await expect(viewer.locator(".inline-block")).toContainText("whoami");
     await expect(viewer.getByRole("button", { name: "Edit code block" })).toHaveCount(0);
     await expect(viewer.getByRole("button", { name: "Insert Code Block" })).toHaveCount(0);
-    await viewer.locator(".inline-block").getByRole("button", { name: "Copy code" }).click();
-    // The Windows clipboard stores line breaks as CRLF.
-    expect(
-      (await viewer.evaluate(() => navigator.clipboard.readText())).replace(/\r\n/g, "\n"),
-    ).toBe('echo "hello class"\nwhoami');
+    await expect(viewer.locator(".inline-block").getByRole("button", { name: /Copy/ })).toHaveCount(0);
     await viewer.screenshot({ path: "test-results/backtick-lesson-student.png" });
     expect(errors).toEqual([]);
   } finally {
@@ -408,9 +404,7 @@ test("Plain Text documents: typing ``` creates interactive code blocks with Copy
   const instructor = await browser.newContext({
     permissions: ["clipboard-read", "clipboard-write"],
   });
-  const student = await browser.newContext({
-    permissions: ["clipboard-read", "clipboard-write"],
-  });
+  const student = await browser.newContext();
   const owner = await instructor.newPage(),
     viewer = await student.newPage();
   const errors: string[] = [];
@@ -517,12 +511,11 @@ test("Plain Text documents: typing ``` creates interactive code blocks with Copy
     await owner.keyboard.press("Control+z");
     await owner.keyboard.press("Control+z");
 
-    // 9. Students see formatted blocks, can copy them, and cannot edit them.
+    // 9. Students see formatted blocks without Copy controls, and cannot edit them.
     await viewer.goto(url);
     await viewer.locator(".sidebar").getByRole("button", { name: "notes.txt", exact: true }).click();
     await expect(viewer.locator(".inline-block")).toHaveCount(2);
-    await viewer.locator(".inline-block").nth(1).getByRole("button", { name: "Copy code" }).click();
-    expect(await clipboard(viewer)).toBe("terraform init");
+    await expect(viewer.locator(".inline-block").getByRole("button", { name: /Copy/ })).toHaveCount(0);
     for (const label of ["Edit code block", "Delete code block", "Insert Code Block", "Add code block"])
       await expect(viewer.getByRole("button", { name: label })).toHaveCount(0);
     await viewer.screenshot({ path: "test-results/plain-text-student.png" });
@@ -531,8 +524,6 @@ test("Plain Text documents: typing ``` creates interactive code blocks with Copy
     await expect(viewer.locator(".markdown-switch")).toHaveCount(0);
     await expect(viewer.locator(".monaco-editor")).toHaveCount(0);
     await expect(viewer.locator(".markdown-preview select")).toHaveCount(0);
-    await viewer.locator(".inline-block").first().getByRole("button", { name: "Copy code" }).click();
-    expect(await clipboard(viewer)).toBe("terraform version");
     expect(errors).toEqual([]);
   } finally {
     await instructor.close().catch(() => {});

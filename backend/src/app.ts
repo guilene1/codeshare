@@ -13,10 +13,18 @@ import * as Y from "yjs";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import {
   hashEditorToken,
+  isShareRole,
   TOKEN_PATTERN,
   workspaceAccess,
 } from "./access.js";
-import { Accounts, csrfFor, equalSecret, newToken, type Session } from "./auth.js";
+import {
+  Accounts,
+  csrfFor,
+  equalSecret,
+  newToken,
+  validEmail,
+  type Session,
+} from "./auth.js";
 import { accountRoutes, authLimits, type AuthLimits } from "./accountRoutes.js";
 import { migrateSnippets } from "./migrate.js";
 import {
@@ -301,7 +309,16 @@ export function createApp(
   });
   app.get("/api/rooms/:roomId", (_req, res) => {
     const room = res.locals.workspace;
+    const session = res.locals.session as Session | undefined;
+    const share = session
+      ? rooms.db
+          .prepare(
+            "SELECT role FROM workspace_shares WHERE workspace_id=? AND user_id=?",
+          )
+          .get(room.id, session.user.id)
+      : undefined;
     res.json({
+      ...(share ? { sharedRole: share.role } : {}),
       id: room.id,
       name: room.name,
       description: room.description,
@@ -433,6 +450,108 @@ export function createApp(
     dropLinkEditors(previous);
     if (previous) rooms.record(id, "link.revoked", "Editor link");
     res.json({ ok: true });
+  });
+  // Account sharing: owners add existing registered users as Viewer or Editor. This only
+  // places the workspace in their Shared with Me list (and, for editors, grants editing);
+  // public viewer links never require an account.
+  app.use("/api/rooms/:roomId/shares", (_req, res, next) => {
+    if (res.locals.access !== "owner") {
+      res
+        .status(403)
+        .json({ error: "Only the workspace owner can manage sharing." });
+      return;
+    }
+    next();
+  });
+  const shareList = (id: string) =>
+    rooms.db
+      .prepare(
+        "SELECT s.user_id AS userId,u.display_name AS displayName,u.email,s.role,s.created_at AS createdAt FROM workspace_shares s JOIN users u ON u.id=s.user_id WHERE s.workspace_id=? ORDER BY s.created_at,u.display_name",
+      )
+      .all(id);
+  const userName = (userId: string) =>
+    (rooms.db.prepare("SELECT display_name FROM users WHERE id=?").get(userId)
+      ?.display_name as string | undefined) ?? "A user";
+  // A changed or revoked share reconnects that user's live sockets with fresh rights.
+  const dropShareSockets = (workspaceId: string, userId: string) =>
+    rooms.disconnect(
+      (auth) => auth.userId === userId && auth.workspaceId === workspaceId,
+      "Your access to this workspace changed. Refresh to continue.",
+    );
+  app.get("/api/rooms/:roomId/shares", (_req, res) => {
+    res.json({ shares: shareList(res.locals.workspace.id) });
+  });
+  app.post(
+    "/api/rooms/:roomId/shares",
+    rateLimit({
+      windowMs: 10 * 60_000,
+      limit: 60,
+      standardHeaders: "draft-8",
+      legacyHeaders: false,
+      message: { error: "Too many sharing changes. Wait a few minutes and try again." },
+    }),
+    (req, res) => {
+      const session = res.locals.session as Session;
+      const id = res.locals.workspace.id;
+      const email = validEmail(req.body.email);
+      const role = req.body.role ?? "viewer";
+      if (!isShareRole(role)) throw new Error("Choose Viewer or Editor.");
+      const user = rooms.db
+        .prepare("SELECT id,display_name FROM users WHERE email=?")
+        .get(email);
+      if (!user) {
+        res.status(404).json({
+          error:
+            "No Kodelumi account uses that email. Students don't need an account: send them the viewer link instead.",
+        });
+        return;
+      }
+      if (user.id === session.user.id) {
+        res.status(400).json({ error: "You already own this workspace." });
+        return;
+      }
+      const now = Date.now();
+      rooms.db
+        .prepare(
+          "INSERT INTO workspace_shares (workspace_id,user_id,role,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?) ON CONFLICT(workspace_id,user_id) DO UPDATE SET role=excluded.role,updated_at=excluded.updated_at",
+        )
+        .run(id, user.id as string, role, session.user.id, now, now);
+      dropShareSockets(id, user.id as string);
+      rooms.record(id, "share.added", `${user.display_name} (${role})`);
+      res.status(201).json({ shares: shareList(id) });
+    },
+  );
+  app.patch("/api/rooms/:roomId/shares/:userId", (req, res) => {
+    const id = res.locals.workspace.id;
+    if (!isShareRole(req.body.role)) throw new Error("Choose Viewer or Editor.");
+    const changed = rooms.db
+      .prepare(
+        "UPDATE workspace_shares SET role=?,updated_at=? WHERE workspace_id=? AND user_id=?",
+      )
+      .run(req.body.role, Date.now(), id, req.params.userId).changes;
+    if (!changed) {
+      res.status(404).json({ error: "That person no longer has access." });
+      return;
+    }
+    dropShareSockets(id, req.params.userId);
+    rooms.record(
+      id,
+      "share.changed",
+      `${userName(req.params.userId)} (${req.body.role})`,
+    );
+    res.json({ shares: shareList(id) });
+  });
+  app.delete("/api/rooms/:roomId/shares/:userId", (req, res) => {
+    const id = res.locals.workspace.id;
+    const name = userName(req.params.userId);
+    const removed = rooms.db
+      .prepare("DELETE FROM workspace_shares WHERE workspace_id=? AND user_id=?")
+      .run(id, req.params.userId).changes;
+    if (removed) {
+      dropShareSockets(id, req.params.userId);
+      rooms.record(id, "share.removed", name);
+    }
+    res.json({ shares: shareList(id) });
   });
   // Renaming or deleting the workspace itself is a management action.
   const requireManager: express.RequestHandler = (_req, res, next) => {

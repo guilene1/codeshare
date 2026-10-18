@@ -344,7 +344,8 @@ export default function CodeEditor({
         renderLineHighlight: "all",
         overviewRulerBorder: false,
         hideCursorInOverviewRuler: true,
-        contextmenu: true,
+        // Monaco's own menu offers Copy; view-only readers get the plain browser menu.
+        contextmenu: !readOnly,
         // Prose documents: word suggestions would capture Enter mid-sentence.
         ...(isDocumentLanguage(file.language)
           ? {

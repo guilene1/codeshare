@@ -17,6 +17,17 @@ export type OwnedWorkspace = {
   folders: number;
   activity: Activity[];
 };
+// A workspace another owner shared with the signed-in account (from /api/me/shared).
+export type SharedWorkspace = {
+  id: string;
+  name: string;
+  description: string;
+  updated_at: number;
+  shared_at: number;
+  role: "viewer" | "editor";
+  ownerName: string;
+};
+export type ShareRole = SharedWorkspace["role"];
 // v1 kept private editor shortcuts (including tokens) in localStorage. v2 only reads
 // them to offer a one-time import into the account, then deletes them.
 export type LegacyShortcut = { id: string; token: string; name: string };
@@ -75,6 +86,10 @@ export function activityText(item: Activity) {
     "link.created": "Created",
     "link.replaced": "Replaced",
     "link.revoked": "Revoked",
+    "share.added": "Shared with",
+    "share.changed": "Changed access for",
+    "share.removed": "Removed access for",
+    "share.left": "Left shared workspace",
   };
   return `${verbs[item.action] ?? "Updated workspace structure"} · ${item.label}`;
 }

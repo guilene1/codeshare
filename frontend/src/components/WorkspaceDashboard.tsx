@@ -7,11 +7,13 @@ import {
   FolderOpen,
   History,
   Loader2,
+  LogOut,
   MoreHorizontal,
   Pencil,
   Plus,
   Search,
   Trash2,
+  Users,
 } from "lucide-react";
 import Modal from "./Modal";
 import { api, readLocal } from "../lib";
@@ -21,6 +23,7 @@ import {
   legacyShortcuts,
   relativeTime,
   type OwnedWorkspace,
+  type SharedWorkspace,
 } from "../workspaces";
 
 export default function WorkspaceDashboard({
@@ -45,6 +48,8 @@ export default function WorkspaceDashboard({
   const [legacy, setLegacy] = useState(legacyShortcuts);
   const [importing, setImporting] = useState(false);
   const [importNotes, setImportNotes] = useState<string[]>([]);
+  const [shared, setShared] = useState<SharedWorkspace[] | null>(null);
+  const [sharedError, setSharedError] = useState("");
   async function load() {
     try {
       const result = await api<{ workspaces: OwnedWorkspace[] }>("/me/workspaces");
@@ -54,8 +59,34 @@ export default function WorkspaceDashboard({
       setLoadError((e as Error).message);
     }
   }
+  async function loadShared() {
+    try {
+      const result = await api<{ workspaces: SharedWorkspace[] }>("/me/shared");
+      setShared(result.workspaces);
+      setSharedError("");
+    } catch (e) {
+      setSharedError((e as Error).message);
+    }
+  }
+  async function leave(item: SharedWorkspace) {
+    setMenu(null);
+    try {
+      await api(`/me/shared/${item.id}`, "DELETE");
+      notify("Removed from Shared with Me");
+      await loadShared();
+    } catch (e) {
+      notify((e as Error).message);
+    }
+  }
+  function open(id: string) {
+    const lesson = readLocal<string | null>("devshare.lastLesson." + id, null);
+    navigate(
+      "/w/" + id + (lesson && /^[\w-]{36}$/.test(lesson) ? "?folder=" + lesson : ""),
+    );
+  }
   useEffect(() => {
     void load();
+    void loadShared();
   }, []);
   useEffect(() => {
     if (!menu) return;
@@ -271,22 +302,7 @@ export default function WorkspaceDashboard({
               </div>
               <div className="workspace-card-bottom">
                 <span>Updated {relativeTime(item.updated_at)}</span>
-                <button
-                  className="text-button"
-                  onClick={() => {
-                    const lesson = readLocal<string | null>(
-                      "devshare.lastLesson." + item.id,
-                      null,
-                    );
-                    navigate(
-                      "/w/" +
-                        item.id +
-                        (lesson && /^[\w-]{36}$/.test(lesson)
-                          ? "?folder=" + lesson
-                          : ""),
-                    );
-                  }}
-                >
+                <button className="text-button" onClick={() => open(item.id)}>
                   Open <ArrowRight size={15} />
                 </button>
               </div>
@@ -294,6 +310,82 @@ export default function WorkspaceDashboard({
           ))}
         </div>
       )}
+      <section className="shared-with-me" aria-label="Shared with Me">
+        <div className="dashboard-heading">
+          <div>
+            <h2>Shared with Me</h2>
+            <p>Workspaces other owners shared with your account.</p>
+          </div>
+        </div>
+        {sharedError ? (
+          <p className="error" role="alert">
+            {sharedError}
+          </p>
+        ) : !shared ? (
+          <p className="dashboard-empty">
+            <Loader2 size={20} className="spin" /> Loading shared workspaces…
+          </p>
+        ) : !shared.length ? (
+          <p className="dashboard-empty">
+            Nothing has been shared with you yet. When an owner shares a
+            workspace with your email, it appears here.
+          </p>
+        ) : (
+          <div className="workspace-grid">
+            {shared.map((item) => (
+              <article
+                className="workspace-card"
+                key={item.id}
+                aria-label={item.name}
+              >
+                <div className="workspace-card-top">
+                  <span className="workspace-card-icon">
+                    <Users size={19} />
+                  </span>
+                  <div className="shortcut-menu">
+                    <button
+                      className="icon-button"
+                      aria-label={`Manage ${item.name}`}
+                      aria-expanded={menu === "shared:" + item.id}
+                      onClick={() =>
+                        setMenu(menu === "shared:" + item.id ? null : "shared:" + item.id)
+                      }
+                    >
+                      <MoreHorizontal size={18} />
+                    </button>
+                    {menu === "shared:" + item.id && (
+                      <div role="menu">
+                        <button
+                          className="danger-item"
+                          onClick={() => void leave(item)}
+                        >
+                          <LogOut size={14} /> Remove from my list
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <h3>{item.name}</h3>
+                <p className="workspace-description">
+                  {item.description || "Lessons, files and code examples."}
+                </p>
+                <div className="workspace-card-counts">
+                  <span className={"role-badge " + item.role}>
+                    {item.role === "editor" ? "Editor" : "Viewer"}
+                  </span>
+                  {item.ownerName && <> Shared by {item.ownerName}</>}
+                </div>
+                <div className="workspace-card-bottom">
+                  <span>Updated {relativeTime(item.updated_at)}</span>
+                  <button className="text-button" onClick={() => open(item.id)}>
+                    Open <ArrowRight size={15} />
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
       {!!activity.length && (
         <section className="recent-activity" aria-label="Recent activity">
           <h3>

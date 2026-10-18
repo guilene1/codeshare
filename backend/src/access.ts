@@ -18,8 +18,13 @@ export type Auth = {
   userId?: string;
   sessionHash?: string;
   tokenHash?: string;
+  // Set on live sockets so a share change can disconnect just that workspace.
+  workspaceId?: string;
 };
 export type Access = "owner" | "editor" | "viewer";
+export type ShareRole = "viewer" | "editor";
+export const isShareRole = (value: unknown): value is ShareRole =>
+  value === "viewer" || value === "editor";
 // Single source of truth for edit rights, re-evaluated on every REST request and
 // every WebSocket write so revoked sessions and links lose access immediately.
 export function workspaceAccess(
@@ -32,13 +37,22 @@ export function workspaceAccess(
     .prepare("SELECT owner_id,editor_token_hash FROM rooms WHERE id=?")
     .get(workspaceId);
   if (!row) return "viewer";
+  const signedIn =
+    !!auth.userId &&
+    !!auth.sessionHash &&
+    sessionValid(auth.sessionHash, auth.userId);
+  if (signedIn && row.owner_id === auth.userId) return "owner";
+  // Account shares: an explicit editor share grants editing; a viewer share adds nothing
+  // beyond the public link except the Shared with Me entry.
   if (
-    auth.userId &&
-    auth.sessionHash &&
-    row.owner_id === auth.userId &&
-    sessionValid(auth.sessionHash, auth.userId)
+    signedIn &&
+    db
+      .prepare(
+        "SELECT 1 FROM workspace_shares WHERE workspace_id=? AND user_id=? AND role='editor'",
+      )
+      .get(workspaceId, auth.userId!)
   )
-    return "owner";
+    return "editor";
   if (auth.tokenHash && equalHash(row.editor_token_hash, auth.tokenHash))
     return "editor";
   return "viewer";

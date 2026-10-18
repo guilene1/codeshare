@@ -158,19 +158,8 @@ test("code blocks: highlighted Kubernetes YAML, exact indentation and copy, full
       .evaluateAll((rows) => rows.map((row) => Number(row.getAttribute("data-line"))));
     expect(numbers).toEqual(manifest.split("\n").map((_, i) => 6 + i));
 
-    // Copy code copies exactly the block; selecting the code and copying does too.
-    await yaml.getByRole("button", { name: "Copy code" }).click();
-    expect(await clipboard(viewer)).toBe(manifest);
-    await yaml.locator("pre").evaluate((pre) => {
-      const range = document.createRange();
-      range.selectNodeContents(pre);
-      getSelection()!.removeAllRanges();
-      getSelection()!.addRange(range);
-    });
-    await viewer.keyboard.press("Control+c");
-    expect((await clipboard(viewer)).replace(/\n$/, "")).toBe(manifest);
-    await blocks.nth(2).getByRole("button", { name: "Copy code" }).click();
-    expect(await clipboard(viewer)).toBe(longCommand);
+    // View-only: no built-in Copy control on any block.
+    await expect(preview.getByRole("button", { name: /Copy/ })).toHaveCount(0);
 
     // Width: code fills the preview (wider than the 900px prose measure); long lines
     // scroll inside the block, never the page.
@@ -208,6 +197,11 @@ test("code blocks: highlighted Kubernetes YAML, exact indentation and copy, full
     await owner.getByRole("button", { name: "Split" }).click();
     const ownerPreview = owner.locator(".markdown-preview");
     await expect(ownerPreview.locator(".inline-block")).toHaveCount(4);
+    // Owners keep Copy code, which copies exactly the block.
+    await ownerPreview.locator(".inline-block").first().getByRole("button", { name: "Copy code" }).click();
+    expect(await clipboard(owner)).toBe(manifest);
+    await ownerPreview.locator(".inline-block").nth(2).getByRole("button", { name: "Copy code" }).click();
+    expect(await clipboard(owner)).toBe(longCommand);
     await owner.screenshot({ path: "test-results/codeblocks-instructor-split.png" });
     await ownerPreview.locator(".inline-block").nth(1).getByRole("button", { name: "Set as YAML" }).click();
     await expect(owner.locator(".monaco-editor .view-lines")).toContainText(FENCE + "yaml");

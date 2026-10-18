@@ -22,6 +22,9 @@
 .workspace-card-counts { color:var(--muted); display:flex; align-items:center; gap:7px; font-size:12px; }
 .workspace-card-bottom { margin-top:18px; padding-top:14px; border-top:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; gap:10px; font-size:11px; color:var(--faint); }
 .workspace-card-bottom .text-button { color:var(--accent); }
+.shared-with-me { margin-top:44px; }
+.role-badge { font-size:11px; font-weight:600; padding:2px 8px; border-radius:999px; color:#68b9cb; background:#68b9cb12; border:1px solid #68b9cb30; }
+.role-badge.editor { color:var(--accent); background:var(--accent-soft); border-color:transparent; }
 .dashboard-filters { display:flex; gap:14px; margin-bottom:24px; }
 .dashboard-filters label { display:flex; gap:9px; align-items:center; border:1px solid var(--border); border-radius:8px; padding:0 12px; flex:1; max-width:480px; color:var(--muted); background:var(--surface); }
 .dashboard-filters input { min-width:0; width:100%; border:0; background:transparent; padding:10px 0; color:var(--text); font-size:13px; }
@@ -112,6 +115,61 @@
 }
 .private-access h3 {
   color: var(--accent);
+}
+.access-share-section.people-access {
+  border-top: 1px solid var(--border);
+  padding-top: 22px;
+  margin-top: 22px;
+}
+.people-add {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+.people-add input,
+.people-add select,
+.people-list select {
+  border: 1px solid var(--border);
+  background: var(--raised);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+.people-add input {
+  flex: 1;
+  min-width: 0;
+}
+.people-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+}
+.people-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+.people-list li > span {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  font-size: 13px;
+}
+.people-list small {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+@media (max-width: 650px) {
+  .people-add {
+    flex-wrap: wrap;
+  }
+  .people-add input {
+    flex-basis: 100%;
+  }
 }
 .share-room-code {
   display: flex;

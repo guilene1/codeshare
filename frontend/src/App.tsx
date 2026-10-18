@@ -577,7 +577,7 @@ function Landing({
                 <small className="feature-label">STRUCTURED KNOWLEDGE</small>
                 <strong>Organize as you build</strong>
                 <small>
-                  Keep docs, files and copyable code blocks together.
+                  Keep docs, files and code blocks together.
                 </small>
               </span>
             </div>
@@ -1470,22 +1470,29 @@ function Workspace({
               <span className="viewer-count-label">{" viewers"}</span>
             </span>
           )}
-          <button
-            className="icon-button desktop-tool"
-            aria-label="Copy workspace link"
-            title="Copy workspace link"
-            onClick={() => copy(location.origin + "/w/" + id, "Workspace link")}
-          >
-            <Link size={17} />
-          </button>
-          <button
-            className="button primary share-button"
-            onClick={() => setDialog("share")}
-          >
-            <Share2 size={15} />
-            <span>Share</span>
-          </button>
-          <span className="nav-divider desktop-tool" />
+          {/* View-only readers get no built-in Copy controls, including link copying. */}
+          {isEditor && (
+            <>
+              <button
+                className="icon-button desktop-tool"
+                aria-label="Copy workspace link"
+                title="Copy workspace link"
+                onClick={() =>
+                  copy(location.origin + "/w/" + id, "Workspace link")
+                }
+              >
+                <Link size={17} />
+              </button>
+              <button
+                className="button primary share-button"
+                onClick={() => setDialog("share")}
+              >
+                <Share2 size={15} />
+                <span>Share</span>
+              </button>
+              <span className="nav-divider desktop-tool" />
+            </>
+          )}
           <button
             className="icon-button"
             aria-label={isEditor ? "Editor settings" : "Viewing preferences"}
@@ -1665,6 +1672,7 @@ function Workspace({
               onDraftConsumed={() => {}}
               blocks={blocks}
               canEdit={false}
+              canCopy={isEditor}
               connected={connected}
               dark={dark}
               fontSize={settings.fontSize}
@@ -1827,17 +1835,19 @@ function Workspace({
                       </button>
                     </>
                   )}
-                  <button
-                    className="icon-button"
-                    aria-label="Copy file"
-                    title="Copy all code in this file"
-                    disabled={!current}
-                    onClick={() =>
-                      current && copy(current.content.toString(), "Code")
-                    }
-                  >
-                    <Copy size={15} />
-                  </button>
+                  {isEditor && (
+                    <button
+                      className="icon-button"
+                      aria-label="Copy file"
+                      title="Copy all code in this file"
+                      disabled={!current}
+                      onClick={() =>
+                        current && copy(current.content.toString(), "Code")
+                      }
+                    >
+                      <Copy size={15} />
+                    </button>
+                  )}
                   {isEditor && (
                     <button
                       className="icon-button"
@@ -1884,15 +1894,17 @@ function Workspace({
                       <Search size={15} />
                     </button>
                   )}
-                  <button
-                    className="icon-button"
-                    aria-label="Download file"
-                    disabled={!current}
-                    onClick={download}
-                    title="Download file"
-                  >
-                    <Download size={15} />
-                  </button>
+                  {isEditor && (
+                    <button
+                      className="icon-button"
+                      aria-label="Download file"
+                      disabled={!current}
+                      onClick={download}
+                      title="Download file"
+                    >
+                      <Download size={15} />
+                    </button>
+                  )}
                   {isEditor && (
                     <button
                       disabled={!isEditor}
@@ -1940,6 +1952,7 @@ function Workspace({
                     file={current}
                     fontSize={settings.fontSize}
                     canEdit={isEditor && connected}
+                    canCopy={isEditor}
                     plain={current.language === "plaintext"}
                     onImages={isEditor && connected ? addImages : undefined}
                     notify={notify}
@@ -1973,6 +1986,7 @@ function Workspace({
                           file={current}
                           fontSize={settings.fontSize}
                           canEdit={isEditor && connected}
+                          canCopy={isEditor}
                           plain={current.language === "plaintext"}
                           onImages={isEditor && connected ? addImages : undefined}
                           notify={notify}
@@ -2137,12 +2151,12 @@ function Workspace({
             <p className="fine-print">
               {isEditor
                 ? "You’re joining with editor access. Keep your private link safe."
-                : "You can view, select, and copy code. Only editors can make changes."}
+                : "View-only access. Only editors can make changes."}
             </p>
           </form>
         </Modal>
       )}
-      {dialog === "share" && (
+      {dialog === "share" && isEditor && (
         <AccessShare
           folderId={folder}
           id={id}
@@ -2305,7 +2319,7 @@ function Workspace({
                 isEditor ? "Editor settings" : "Viewing preferences",
                 "Ctrl / ⌘ Shift P",
               ],
-              [isEditor ? "Copy / paste" : "Copy", "Ctrl / ⌘ C / V"],
+              ...(isEditor ? [["Copy / paste", "Ctrl / ⌘ C / V"]] : []),
               ["Close file tab", "Alt W / middle-click"],
             ].map(([label, key]) => (
               <div key={label}>

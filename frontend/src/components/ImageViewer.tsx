@@ -11,10 +11,13 @@ const MAX_SCALE = 8;
 export default function ImageViewer({
   src,
   alt,
+  canOpenOriginal = false,
   onClose,
 }: {
   src: string;
   alt: string;
+  // Owners and editors only: a link to the original file (effectively a download).
+  canOpenOriginal?: boolean;
   onClose: () => void;
 }) {
   const dialog = useRef<HTMLDivElement>(null);
@@ -207,9 +210,11 @@ export default function ImageViewer({
           >
             1:1
           </button>
-          <a className="text-button" href={src} target="_blank" rel="noopener noreferrer" title="Open the original file in a new tab">
-            <ExternalLink size={14} /> Original
-          </a>
+          {canOpenOriginal && (
+            <a className="text-button" href={src} target="_blank" rel="noopener noreferrer" title="Open the original file in a new tab">
+              <ExternalLink size={14} /> Original
+            </a>
+          )}
           <button ref={closeButton} className="icon-button image-viewer-close" aria-label="Close image viewer" title="Close (Esc)" onClick={onClose}>
             <X size={18} />
           </button>

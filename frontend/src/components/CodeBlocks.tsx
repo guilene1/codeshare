@@ -20,6 +20,8 @@ type Props = {
   onDraftConsumed?: () => void;
   blocks: CodeBlock[];
   canEdit: boolean;
+  // View-only readers get no built-in Copy control.
+  canCopy: boolean;
   connected: boolean;
   dark: boolean;
   fontSize: number;
@@ -33,6 +35,7 @@ function BlockCard({
   block,
   fontSize,
   canEdit,
+  canCopy,
   busy,
   first,
   last,
@@ -43,6 +46,7 @@ function BlockCard({
   block: CodeBlock;
   fontSize: number;
   canEdit: boolean;
+  canCopy: boolean;
   busy: boolean;
   first: boolean;
   last: boolean;
@@ -102,14 +106,14 @@ function BlockCard({
       {compact ? (
         <div className="snippet-command">
           {code}
-          {copyButton}
+          {canCopy && copyButton}
         </div>
       ) : (
         <>
           <header className="snippet-header">
             <strong>{block.title || "Code snippet"}</strong>
             <span className="snippet-language">{label}</span>
-            {copyButton}
+            {canCopy && copyButton}
           </header>
           {code}
         </>
@@ -163,6 +167,7 @@ export default function CodeBlocks({
   onDraftConsumed,
   blocks,
   canEdit,
+  canCopy,
   connected,
   dark,
   fontSize,
@@ -245,7 +250,7 @@ export default function CodeBlocks({
           <h2>
             Code Blocks <span>{blocks.length}</span>
           </h2>
-          <p>Examples and commands. Copy exactly what you need.</p>
+          <p>Examples and commands from your instructor.</p>
         </div>
         {canEdit && (
           <button
@@ -270,6 +275,7 @@ export default function CodeBlocks({
               block={block}
               fontSize={fontSize}
               canEdit={canEdit}
+              canCopy={canCopy}
               busy={busy || !connected}
               first={index === 0}
               last={index === blocks.length - 1}
@@ -290,7 +296,7 @@ export default function CodeBlocks({
           <p>
             {canEdit
               ? "Add a Terraform example, a short command, or any code students need to copy."
-              : "Every block has its own Copy button. Instructor changes appear live."}
+              : "Instructor changes appear live."}
           </p>
         </div>
       )}

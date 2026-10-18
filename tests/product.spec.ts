@@ -265,16 +265,14 @@ test("instructor's account dashboard follows them across devices, previews safe 
     await student
       .getByRole("button", { name: "Toggle explorer", exact: true })
       .click();
-    const copyButton = student.locator(".inline-block .snippet-copy");
+    // View-only on mobile: the block fits the screen and has no built-in Copy control.
+    const block = student.locator(".inline-block").first();
     expect(
-      await copyButton.evaluate(
-        (button) => button.getBoundingClientRect().right <= innerWidth,
+      await block.evaluate(
+        (node) => node.getBoundingClientRect().right <= innerWidth,
       ),
     ).toBe(true);
-    await copyButton.click();
-    expect(await student.evaluate(() => navigator.clipboard.readText())).toBe(
-      "terraform init",
-    );
+    await expect(student.locator(".inline-block .snippet-copy")).toHaveCount(0);
     await student.screenshot({
       path: "test-results/product-notes-mobile.png",
       fullPage: true,

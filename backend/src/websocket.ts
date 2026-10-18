@@ -133,7 +133,7 @@ export function setupWebsocket(
       wss.handleUpgrade(req, socket, head, (peer) => {
         wire(room);
         room.peers.set(peer, new Set());
-        rooms.connections.set(peer, auth);
+        rooms.connections.set(peer, { ...auth, workspaceId: room.workspaceId });
         room.touched = Date.now();
         let alive = true,
           count = 0,

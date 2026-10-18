@@ -82,33 +82,29 @@ test("instructor broadcasts to read-only students without leaking the private li
     await expect(viewer.locator(".status-bar")).toContainText(
       "Instructor is editing",
     );
-    await student.grantPermissions(["clipboard-read", "clipboard-write"]);
-    await viewer
-      .getByRole("button", { name: "Copy file", exact: true })
-      .click();
-    expect(
-      await viewer.evaluate(() => navigator.clipboard.readText()),
-    ).toContain("Instructor example");
-    await studentEditor.focus();
-    await viewer.keyboard.press("Control+a");
-    await viewer.keyboard.press("Control+c");
-    expect(
-      await viewer.evaluate(() => navigator.clipboard.readText()),
-    ).toContain("provider");
+    // View-only students get no built-in Copy, Download or Share controls; owners keep them.
+    for (const label of [
+      "Copy file",
+      "Download file",
+      "Copy workspace link",
+      "Share",
+    ]) {
+      await expect(
+        viewer.getByRole("button", { name: label, exact: true }),
+      ).toHaveCount(0);
+      await expect(
+        owner.getByRole("button", { name: label, exact: true }),
+      ).toBeVisible();
+    }
     await viewer
       .getByRole("button", { name: "Find in file", exact: true })
       .click();
     await expect(viewer.locator(".find-widget")).toBeVisible();
     await viewer.keyboard.press("Escape");
-    await viewer.getByRole("button", { name: "Share", exact: true }).click();
-    await expect(
-      viewer.getByRole("button", { name: "Copy Editor Link", exact: true }),
-    ).toHaveCount(0);
     await expect(
       viewer.getByLabel("Private editor link", { exact: true }),
     ).toHaveCount(0);
     expect(await viewer.content()).not.toContain(token);
-    await viewer.getByRole("button", { name: "Close dialog" }).click();
     const roomId = studentUrl.split("/").pop()!;
     const attacks = await viewer.evaluate(async (id) => {
       const bodies = [
