@@ -4,6 +4,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type CSSProperties,
   type FormEvent,
 } from "react";
 import {
@@ -69,6 +70,7 @@ import { AuthContext, loadSession, useAuth, type AuthState, type User } from "./
 import { fence, imageMarkdown, insertBlock, isDocumentLanguage } from "./markdown";
 import { BRAND, Logo, LogoMark, TAGLINE } from "./brand";
 import CourseExplorer from "./components/CourseExplorer";
+import ExplorerResizer, { clampExplorerWidth } from "./components/ExplorerResizer";
 import { ClassroomAwareness } from "./components/ClassroomAwareness";
 import {
   api,
@@ -665,6 +667,13 @@ function Workspace({
       | null
     >(null),
     [sidebar, setSidebar] = useState(() => window.innerWidth > 560),
+    // null keeps the responsive default width; a number is the user's dragged width.
+    [sidebarWidth, setSidebarWidth] = useState<number | null>(() => {
+      const saved = readLocal<unknown>("devshare.sidebarWidth", null);
+      return typeof saved === "number" && Number.isFinite(saved)
+        ? clampExplorerWidth(saved, Infinity) // CSS caps it to the window
+        : null;
+    }),
     [filename, setFilename] = useState(""),
     [fileLang, setFileLang] = useState("hcl"),
     [busy, setBusy] = useState(false),
@@ -687,6 +696,8 @@ function Workspace({
     : undefined;
   const isOwner = room?.access === "owner";
   const isEditor = isOwner || room?.access === "editor";
+  const anonymousViewers =
+    viewerCount + (viewerCount === 1 ? " anonymous viewer" : " anonymous viewers");
   // Viewers always read documents in the formatted Preview; only editors switch views.
   const markdownMode = isEditor ? chosenMode : "preview";
   // Owners manage the workspace; unclaimed v1 workspaces keep link-based management.
@@ -1463,7 +1474,7 @@ function Workspace({
           {isEditor && (
             <span
               className="presence-count"
-              title={`${viewerCount} anonymous viewers online`}
+              title={`${anonymousViewers} online`}
             >
               <Users size={16} />
               {viewerCount}
@@ -1536,7 +1547,14 @@ function Workspace({
           )}
         </div>
       )}
-      <div className="workspace-body">
+      <div
+        className="workspace-body"
+        style={
+          sidebarWidth === null
+            ? undefined
+            : ({ "--sidebar-width": sidebarWidth + "px" } as CSSProperties)
+        }
+      >
         {sidebar && (
           <aside className="sidebar">
             <div className="sidebar-heading">
@@ -1570,7 +1588,7 @@ function Workspace({
                   CONNECTED<span>{people.length + viewerCount}</span>
                 </div>
                 <p className="anonymous-viewers">
-                  {viewerCount} anonymous viewers
+                  {anonymousViewers}
                 </p>
                 {people.map((p) => (
                   <div className="person" key={p.id}>
@@ -1613,6 +1631,15 @@ function Workspace({
               Shared workspace<span>v1.0</span>
             </div>
           </aside>
+        )}
+        {sidebar && (
+          <ExplorerResizer
+            width={sidebarWidth}
+            onChange={(width) => {
+              setSidebarWidth(width);
+              storeLocal("devshare.sidebarWidth", width);
+            }}
+          />
         )}
         <main className="editor-main">
           <div className="workspace-views" aria-label="Workspace views">

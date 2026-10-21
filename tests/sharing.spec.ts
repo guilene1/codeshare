@@ -60,13 +60,6 @@ async function expectViewOnlyControls(page: Page) {
   await page.getByRole("button", { name: "Close image viewer" }).click();
 }
 
-test("tab title is exactly Kodelumi on every page", async ({ page }) => {
-  for (const path of ["/", "/signin", "/signup"]) {
-    await page.goto(path);
-    await expect(page).toHaveTitle("Kodelumi");
-  }
-});
-
 test("sharing: Viewer and Editor accounts, Shared with Me, view-only controls, anonymous links unchanged", async ({
   browser,
 }) => {

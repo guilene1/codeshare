@@ -144,7 +144,7 @@ export default function CourseExplorer({
                   ) : (
                     <Folder size={15} />
                   )}
-                  <span>{item.name}</span>
+                  <span title={item.name}>{item.name}</span>
                 </button>
                 {canEdit && (
                   <details className="folder-menu" open={menu === item.id}>
@@ -213,7 +213,7 @@ export default function CourseExplorer({
               onClick={() => onOpen(parent, file.id)}
             >
               <FileCode2 size={15} />
-              <span>{file.filename}</span>
+              <span title={file.filename}>{file.filename}</span>
             </button>
           ))}
       </>

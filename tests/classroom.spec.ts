@@ -43,7 +43,7 @@ test("instructor broadcasts to read-only students without leaking the private li
     await expect(owner.locator(".presence-count")).toContainText("1");
     await expect(viewer.getByLabel("Programming language")).toHaveCount(0);
     await expect(owner.locator(".sidebar-people")).toContainText(
-      "1 anonymous viewers",
+      "1 anonymous viewer",
     );
     await expect(owner.locator(".sidebar-people .person")).toHaveCount(1);
     for (const label of [

@@ -950,7 +950,9 @@ option {
   min-height: 0;
 }
 .sidebar {
-  width: 234px;
+  width: var(--sidebar-width, 234px);
+  min-width: 180px;
+  max-width: max(180px, calc(100vw - 340px));
   flex-shrink: 0;
   border-right: 1px solid var(--border);
   background: var(--bg);
@@ -1043,6 +1045,12 @@ option {
   padding-top: 12px;
   overflow: auto;
   max-height: 35%;
+}
+.anonymous-viewers {
+  padding: 4px 18px;
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
 }
 .person {
   display: flex;
@@ -1140,6 +1148,37 @@ option {
 }
 .sidebar-bottom > span:last-child {
   margin-left: auto;
+}
+.explorer-resizer {
+  position: relative;
+  z-index: 5;
+  flex-shrink: 0;
+  width: 9px;
+  margin: 0 -5px 0 -4px;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+/* A thin line drawn over the sidebar border, highlighted the way VS Code's sash is. */
+.explorer-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 3px;
+  background: transparent;
+  transition: background 0.15s 0.1s;
+}
+.explorer-resizer:hover::after,
+.explorer-resizer:focus-visible::after,
+.resizing-explorer .explorer-resizer::after {
+  background: var(--accent);
+}
+.resizing-explorer,
+.resizing-explorer * {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 .editor-main {
   display: flex;
@@ -1846,7 +1885,7 @@ option {
     width: 175px;
   }
   .sidebar {
-    width: 205px;
+    width: var(--sidebar-width, 205px);
   }
   .workspace-nav .nav-right {
     gap: 4px;
@@ -1931,7 +1970,7 @@ option {
     margin: 0 3px;
   }
   .sidebar {
-    width: 190px;
+    width: var(--sidebar-width, 190px);
   }
   .sidebar-tip {
     display: none;
@@ -2049,6 +2088,12 @@ option {
     z-index: 10;
     box-shadow: 15px 0 35px #0004;
     width: 210px;
+    min-width: 0;
+    max-width: 85vw;
+  }
+  /* The phone Explorer is an overlay with a fixed width, so it has no splitter. */
+  .explorer-resizer {
+    display: none;
   }
   .sidebar-tip {
     display: block;
