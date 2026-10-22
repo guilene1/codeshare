@@ -150,7 +150,9 @@ test("instructor broadcasts to read-only students without leaking the private li
       .click();
     await openFromExplorer(viewer, "lesson-variables.tf");
     await owner.getByLabel("Programming language").selectOption("python");
-    await expect(viewer.getByLabel("File language")).toHaveText("python");
+    // Viewers see no language label in the header; the change still reaches them.
+    await expect(viewer.getByLabel("File language")).toHaveCount(0);
+    await expect(viewer.locator(".status-bar")).toContainText("Python");
     await owner
       .getByRole("button", { name: "Editor settings", exact: true })
       .click();

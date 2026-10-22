@@ -40,10 +40,13 @@ function awarenessMessage(room: Room, ids: number[]) {
 }
 // View-only (and untracked) sockets receive Editors' states (classroom cursors) but never
 // other viewers'.
+// A view-only socket may see Editors' states and its own, never another viewer's. Its own echo
+// matters: y-websocket reconnects a client that receives nothing for 30 seconds, and the 15 s
+// renewal of its own state is what keeps an otherwise quiet viewer connected.
+const visibleTo = (room: Room, peer: WebSocket) => (id: number) =>
+  !room.viewerIds.has(id) || room.awarenessOwners.get(id) === peer;
 function sendAwareness(rooms: Rooms, room: Room, peer: WebSocket, ids: number[]) {
-  const visible = rooms.canSeePresence(peer)
-    ? ids
-    : ids.filter((id) => !room.viewerIds.has(id));
+  const visible = rooms.canSeePresence(peer) ? ids : ids.filter(visibleTo(room, peer));
   if (visible.length) send(peer, awarenessMessage(room, visible));
 }
 function wire(rooms: Rooms, room: Room) {
@@ -76,6 +79,9 @@ function wire(rooms: Rooms, room: Room) {
       if (rooms.canSeePresence(peer)) {
         full ??= awarenessMessage(room, ids);
         send(peer, full);
+      } else if (ids.some((id) => room.viewerIds.has(id) && room.awarenessOwners.get(id) === peer)) {
+        // This viewer's own update: echo it back (with any Editors' states).
+        send(peer, awarenessMessage(room, ids.filter(visibleTo(room, peer))));
       } else {
         if (!editorIds.length) continue;
         editorsOnly ??= awarenessMessage(room, editorIds);

@@ -334,6 +334,77 @@ test("an untracked socket is denied presence, activity and viewers' awareness by
   }
 });
 
+test("a viewer receives its own presence echo (keep-alive) but never another viewer's", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "kodelumi-echo-"));
+  const app = createApp({ dbPath: join(dir, "db.sqlite"), origins: [origin], checkpointMs: 30 });
+  await new Promise<void>((r) => app.server.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${(app.server.address() as { port: number }).port}`;
+  const providers: WebsocketProvider[] = [];
+  // Records the client IDs in every awareness frame (type 1) a socket receives.
+  const viewer = (room: string) => {
+    class Socket extends WebSocket {
+      constructor(url: string, p?: string | string[]) {
+        super(url, p, { origin });
+      }
+    }
+    const provider = new WebsocketProvider(base.replace("http", "ws") + "/ws", room, new Y.Doc(), {
+      WebSocketPolyfill: Socket as never,
+      disableBc: true,
+      protocols: ["devshare"],
+    });
+    provider.awareness.setLocalState({ viewer: true });
+    const seen: number[][] = [];
+    provider.on("status", ({ status }: { status: string }) => {
+      if (status !== "connected") return;
+      (provider.ws as unknown as WebSocket).addEventListener("message", (event: { data: ArrayBuffer | Buffer }) => {
+        const decoder = decoding.createDecoder(new Uint8Array(event.data as ArrayBuffer));
+        if (decoding.readVarUint(decoder) !== 1) return;
+        const update = decoding.createDecoder(decoding.readVarUint8Array(decoder));
+        seen.push(
+          Array.from({ length: decoding.readVarUint(update) }, () => {
+            const id = decoding.readVarUint(update);
+            decoding.readVarUint(update);
+            decoding.readVarString(update);
+            return id;
+          }),
+        );
+      });
+    });
+    providers.push(provider);
+    return { provider, seen };
+  };
+  try {
+    const owner = await signUp(base, origin, "Echo Owner");
+    const { id } = (await (
+      await fetch(base + "/api/rooms", {
+        method: "POST",
+        headers: { ...owner.headers, "content-type": "application/json" },
+        body: JSON.stringify({ name: "Echo", language: "yaml" }),
+      })
+    ).json()) as { id: string };
+    // Two anonymous viewers and no editor: nothing else would ever reach them.
+    const a = viewer(id),
+      b = viewer(id);
+    await until(() => a.provider.synced && b.provider.synced);
+    await new Promise((r) => setTimeout(r, 300));
+    a.seen.length = 0;
+    b.seen.length = 0;
+    // A renews its presence (as y-websocket does every 15 s).
+    a.provider.awareness.setLocalStateField("renewed", Date.now());
+    const me = a.provider.awareness.clientID;
+    await until(() => a.seen.some((ids) => ids.includes(me)), 3000);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.ok(a.seen.every((ids) => ids.every((x) => x === me)), "A receives only its own state");
+    assert.ok(b.seen.every((ids) => !ids.includes(me)), "B never receives A's state");
+  } finally {
+    for (const p of providers) {
+      p.destroy();
+      p.doc.destroy();
+    }
+    await app.close();
+  }
+});
+
 test("activity attribution migration is additive and keeps older rows readable", async () => {
   const dir = await mkdtemp(join(tmpdir(), "kodelumi-activity-migration-"));
   const path = join(dir, "db.sqlite");

@@ -707,6 +707,18 @@ function Workspace({
   const isOwner = room?.access === "owner";
   const isEditor = isOwner || room?.access === "editor";
   const anonymousViewers = plural(presence?.anonymous ?? 0, "anonymous viewer");
+  // Editors get the views bar (activity, lesson name, view switch); viewers only need it to
+  // reach unmigrated legacy snippets.
+  const showViews = isEditor || (!!blocks.length && !migrated);
+  const explorerToggle = (
+    <button
+      className={"icon-button" + (showViews ? "" : " sidebar-toggle")}
+      aria-label="Toggle explorer"
+      onClick={() => setSidebar(!sidebar)}
+    >
+      <PanelLeft size={16} />
+    </button>
+  );
   // Viewers always read documents in the formatted Preview; only editors switch views.
   const markdownMode = isEditor ? chosenMode : "preview";
   // Owners manage the workspace; unclaimed v1 workspaces keep link-based management.
@@ -735,7 +747,9 @@ function Workspace({
     if (!synced) return;
     const exists = (fileId: string) => files.some((file) => file.id === fileId);
     if (tabsFor.current !== tabsKey) {
-      // First sync of this lesson: restore remembered tabs, or open the first file.
+      // First sync of this lesson: restore remembered tabs, or open the first file. Updates
+      // are functional, so a file the user clicked before (or in the same render as) this
+      // first sync is merged in and stays selected instead of being overwritten.
       tabsFor.current = tabsKey;
       const saved = readLocal<{ tabs?: unknown; active?: unknown }>(tabsKey, {});
       const remembered = Array.isArray(saved.tabs)
@@ -743,29 +757,25 @@ function Workspace({
             (tab): tab is string => typeof tab === "string" && exists(tab),
           )
         : null;
-      const next = [
-        ...new Set([
-          ...(remembered ?? (files[0] ? [files[0].id] : [])),
-          ...openTabs.filter(exists),
-        ]),
-      ];
-      setOpenTabs(next);
-      setActive(
-        next.includes(active)
-          ? active
-          : typeof saved.active === "string" && next.includes(saved.active)
+      const restored = remembered ?? (files[0] ? [files[0].id] : []);
+      setOpenTabs((tabs) => [...new Set([...restored, ...tabs.filter(exists)])]);
+      setActive((current) =>
+        exists(current)
+          ? current
+          : typeof saved.active === "string" && restored.includes(saved.active)
             ? saved.active
-            : (next[0] ?? ""),
+            : (restored[0] ?? ""),
       );
       return;
     }
     // Files deleted by the instructor disappear from everyone's tabs.
     const pending = pendingFile.current;
-    if (openTabs.some((tab) => !exists(tab) && tab !== pending)) {
-      const kept = openTabs.filter((tab) => exists(tab) || tab === pending);
-      setOpenTabs(kept);
-      if (!kept.includes(active)) setActive(kept[0] ?? "");
-    }
+    const keep = (tab: string) => exists(tab) || tab === pending;
+    setOpenTabs((tabs) => (tabs.every(keep) ? tabs : tabs.filter(keep)));
+    setActive((current) => {
+      if (!current || keep(current)) return current;
+      return openTabs.filter(keep)[0] ?? "";
+    });
   }, [files, synced, tabsKey]);
   useEffect(() => {
     if (tabsFor.current === tabsKey)
@@ -1518,17 +1528,16 @@ function Workspace({
           {isEditor ? <Pencil size={13} /> : <Eye size={14} />}
           <span>{isEditor ? "Editing" : "View Only"}</span>
         </span>
-        <div className="toolbar-language">
-          {isEditor ? (
+        {/* Editors choose the file's language; viewers just read the highlighted file. */}
+        {isEditor && (
+          <div className="toolbar-language">
             <LanguageSelect
               value={current?.language ?? "hcl"}
               onChange={changeLanguage}
               disabled={!connected || !current}
             />
-          ) : (
-            <span aria-label="File language">{current?.language ?? "hcl"}</span>
-          )}
-        </div>
+          </div>
+        )}
         <div className="nav-right">
           {isEditor && (
             <span
@@ -1718,14 +1727,9 @@ function Workspace({
           />
         )}
         <main className="editor-main">
+          {showViews && (
           <div className="workspace-views" aria-label="Workspace views">
-            <button
-              className="icon-button"
-              aria-label="Toggle explorer"
-              onClick={() => setSidebar(!sidebar)}
-            >
-              <PanelLeft size={16} />
-            </button>
+            {explorerToggle}
             {isEditor && (
               <WorkspaceActivity
                 presence={presence}
@@ -1735,11 +1739,13 @@ function Workspace({
                 onLoadMore={() => void loadMoreActivity()}
               />
             )}
-            <span className="lesson-name">
-              {folder
-                ? tree.folders.find((item) => item.id === folder)?.name
-                : "Workspace root"}
-            </span>
+            {isEditor && (
+              <span className="lesson-name">
+                {folder
+                  ? tree.folders.find((item) => item.id === folder)?.name
+                  : "Workspace root"}
+              </span>
+            )}
             <button
               className={workspaceView === "editor" ? "active" : ""}
               aria-pressed={workspaceView === "editor"}
@@ -1757,6 +1763,7 @@ function Workspace({
               </button>
             )}
           </div>
+          )}
           {workspaceView === "blocks" && blocks.length && !migrated ? (
             <div className="legacy-snippets">
               <div className="migrate-banner">
@@ -1804,6 +1811,8 @@ function Workspace({
           ) : (
             <>
               <div className="tab-bar">
+                {/* Without the views bar, the Explorer toggle sits at the start of the tabs. */}
+                {!showViews && explorerToggle}
                 <div className="tabs" role="tablist" aria-label="Open files">
                   {openTabs.map((tabId) => {
                     const f = files.find((file) => file.id === tabId);
@@ -2176,12 +2185,17 @@ function Workspace({
           {!isEditor && people.some((person) => person.role === "editor") && (
             <span className="status-hide">Instructor is editing</span>
           )}
-          <span>
-            Ln {position.line}, Col {position.col}
-          </span>
-          <span className="status-hide">Spaces: {settings.tabSize}</span>
-          <span className="status-hide">UTF-8</span>
-          <span>
+          {/* Cursor position, indentation and encoding only matter to someone editing. */}
+          {isEditor && (
+            <>
+              <span className="status-position">
+                Ln {position.line}, Col {position.col}
+              </span>
+              <span className="status-hide">Spaces: {settings.tabSize}</span>
+              <span className="status-hide">UTF-8</span>
+            </>
+          )}
+          <span className="status-language">
             {languages.find((l) => l[0] === current?.language)?.[1] ??
               "Plain Text"}
           </span>
