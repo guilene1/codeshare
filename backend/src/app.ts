@@ -11,8 +11,16 @@ import {
   CONTENT_ACTIONS,
   activityEntry,
   addDocument,
+  contentVersion,
+  fileTooLarge,
   filename,
   language,
+  MAX_CONTENT,
+  MAX_DOCUMENT,
+  normalizeNewlines,
+  replaceContent,
+  tooLarge,
+  type Room,
 } from "./rooms.js";
 import { Images, MAX_IMAGE_BYTES, fetchImage } from "./images.js";
 import { setupWebsocket } from "./websocket.js";
@@ -49,6 +57,7 @@ import {
   orderedBlocks,
   reorderBlocks,
   validateBlockCapacity,
+  validateLessonCapacity,
   type CodeBlock,
 } from "./blocks.js";
 
@@ -127,10 +136,27 @@ export function createApp(
       crossOriginEmbedderPolicy: false,
     }),
   );
-  app.use(express.json({ limit: "128kb" }));
+  // File text routes (create, content update) accept documents up to MAX_DOCUMENT: JSON escaping
+  // can double the size of code, and content updates may also be sent as raw text/plain. Their
+  // bodies are parsed only inside those routes, i.e. after the rate limit, session/CSRF and
+  // access checks, so unauthorised clients never make the server parse a large body. The
+  // decoded text is checked against the real limits in the route. Every other route keeps the
+  // small limits (128 KB parsed, 16 KB serialized; code blocks are checked per block instead).
+  const fileText = /^\/api\/rooms\/[\w-]{16}\/documents(?:\/[\w-]{36}\/content)?$/;
+  const fileTextLimit = 2 * MAX_DOCUMENT + 64 * 1024;
+  const smallJson = express.json({ limit: "128kb" }),
+    fileJson = express.json({ limit: fileTextLimit }),
+    fileRaw = express.text({ type: "text/plain", limit: fileTextLimit });
+  const fileBody: express.RequestHandler = (req, res, next) =>
+    fileRaw(req, res, (error?: unknown) => (error ? next(error) : fileJson(req, res, next)));
+  app.use((req, res, next) => {
+    if (req.method !== "GET" && fileText.test(req.path)) return next();
+    smallJson(req, res, next);
+  });
   app.use((req, res, next) => {
     if (
       !/^\/api\/rooms\/[\w-]{16}\/blocks(?:\/|$)/.test(req.path) &&
+      !fileText.test(req.path) &&
       Buffer.byteLength(JSON.stringify(req.body ?? {})) > 16 * 1024
     ) {
       res.status(413).json({ error: "Request too large." });
@@ -836,7 +862,8 @@ export function createApp(
     }
     res.json(result);
   });
-  app.post("/api/rooms/:roomId/documents", (req, res) => {
+  app.post("/api/rooms/:roomId/documents", fileBody, (req, res) => {
+    req.body ??= {};
     if (
       Number(
         rooms.db
@@ -847,10 +874,12 @@ export function createApp(
       throw new Error(
         "A course supports up to 2,048 files. Start another workspace for additional courses.",
       );
-    const content = req.body.content ?? "";
-    if (typeof content !== "string" || Buffer.byteLength(content) > 64 * 1024)
-      throw new Error("Initial file content must be text up to 64 KB.");
-    if (content) validateBlockCapacity(res.locals.room, content);
+    if (req.body.content !== undefined && typeof req.body.content !== "string")
+      throw new Error("File content must be text.");
+    const content = normalizeNewlines(req.body.content ?? "");
+    const bytes = Buffer.byteLength(content);
+    if (bytes > MAX_DOCUMENT) throw fileTooLarge(bytes);
+    if (content) validateLessonCapacity(res.locals.room, content);
     const id = addDocument(
       res.locals.room,
       filename(req.body.filename),
@@ -865,7 +894,91 @@ export function createApp(
       res.locals.actor,
     );
     rooms.syncCatalog(res.locals.room.workspaceId);
-    res.status(201).json({ id });
+    const version = contentVersion(content);
+    res.status(201).set("ETag", `"${version}"`).json({ id, version, bytes });
+  });
+  // Direct file text access for tools such as Claude Code (by file ID; the lesson is found from
+  // the file when ?folder= is omitted). Reading follows workspace read access, like the editor;
+  // writing needs Owner or Editor rights (the write guard above refuses viewers).
+  const fileRoom = (req: express.Request, res: express.Response) => {
+    const id = req.params.id as string;
+    let room = res.locals.room as Room;
+    if (!room.doc.getMap("documents").has(id) && req.query.folder === undefined) {
+      const folder = rooms.db
+        .prepare("SELECT folder_id FROM documents WHERE id=? AND room_id=?")
+        .get(id, res.locals.workspace.id)?.folder_id;
+      if (typeof folder === "string") room = rooms.get(res.locals.workspace.id, folder) ?? room;
+    }
+    const item = room.doc.getMap<Y.Map<unknown>>("documents").get(id);
+    if (!item) {
+      res.status(404).json({ error: "File not found." });
+      return undefined;
+    }
+    return { room, item };
+  };
+  app.get("/api/rooms/:roomId/documents/:id/content", (req, res) => {
+    const found = fileRoom(req, res);
+    if (!found) return;
+    const content = (found.item.get("content") as Y.Text).toString();
+    const version = contentVersion(content);
+    res.set("ETag", `"${version}"`).json({
+      id: req.params.id,
+      filename: found.item.get("filename"),
+      language: found.item.get("language"),
+      folderId: found.room.folderId,
+      content,
+      version,
+      bytes: Buffer.byteLength(content),
+      updatedAt: found.item.get("updatedAt"),
+    });
+  });
+  // Replaces a file's text in one Yjs transaction (open editors update live). Optimistic
+  // concurrency: the caller names the version it read (If-Match, or "baseVersion" in JSON);
+  // a mismatch is refused with 409 and nothing changes. If-Match: * overwrites deliberately.
+  app.put("/api/rooms/:roomId/documents/:id/content", fileBody, (req, res) => {
+    const found = fileRoom(req, res);
+    if (!found) return;
+    const raw = typeof req.body === "string" ? req.body : req.body?.content;
+    if (typeof raw !== "string")
+      throw new Error('Send the file text as text/plain, or as JSON {"content": "..."}.');
+    const existing = (found.item.get("content") as Y.Text).toString();
+    const content = normalizeNewlines(raw, existing);
+    const bytes = Buffer.byteLength(content);
+    if (bytes > MAX_DOCUMENT) throw fileTooLarge(bytes);
+    validateLessonCapacity(found.room, content, { fileId: req.params.id as string });
+    if (Y.encodeStateAsUpdate(found.room.doc).byteLength + bytes > 4 * MAX_CONTENT)
+      throw tooLarge("Lesson storage limit exceeded. Export your files or create another lesson.");
+    const base = (
+      (req.headers["if-match"] as string | undefined) ??
+      (typeof req.body === "object" ? req.body?.baseVersion : undefined) ??
+      ""
+    )
+      .trim()
+      .replace(/^W\//, "")
+      .replace(/^"|"$/g, "");
+    const current = contentVersion(existing);
+    if (!base) {
+      res.status(428).json({
+        error:
+          "Send the version you are replacing (If-Match header from GET …/content), or If-Match: * to overwrite.",
+        version: current,
+      });
+      return;
+    }
+    if (base !== "*" && base !== current) {
+      res.status(409).json({
+        error: "This file changed since you read it. Fetch the latest content and try again.",
+        version: current,
+      });
+      return;
+    }
+    const changed = replaceContent(found.room, req.params.id as string, content);
+    if (changed) {
+      rooms.noteEdit(found.room, req.params.id as string, res.locals.actor);
+      rooms.save(found.room);
+    }
+    const version = contentVersion(content);
+    res.set("ETag", `"${version}"`).json({ id: req.params.id, version, bytes, changed });
   });
   app.patch("/api/rooms/:roomId/documents/order", (req, res) => {
     const room = res.locals.room,
@@ -1022,13 +1135,20 @@ export function createApp(
   app.use(
     (
       error: Error & { status?: number },
-      _req: express.Request,
+      req: express.Request,
       res: express.Response,
       _next: express.NextFunction,
     ) => {
       console.error(error.message);
+      // Body-parser refusals get a size message; our own 413s keep their specific text.
+      const parserTooLarge =
+        (error as { type?: string }).type === "entity.too.large";
       res.status(error.status ?? 400).json({
-        error: error.status === 413 ? "Request too large." : error.message,
+        error: !parserTooLarge
+          ? error.message
+          : fileText.test(req.path)
+            ? "Files can be up to 1 MB of text."
+            : "Request too large.",
       });
     },
   );

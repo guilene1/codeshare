@@ -160,6 +160,7 @@ Return to the branch with `git checkout main` once a fixed release is ready.
 - Roll back images **and** the checkout together, so the Caddyfile and Compose settings match the images.
 - SQLite migrations are additive (new tables/columns only), so earlier code normally runs against a newer database. If a release ever ships a non-additive migration, restore the pre-deploy backup (section 5) instead of only rolling back images.
 - A rollback never requires deleting volumes.
+- **Large-document release:** files may now be up to 1 MiB and lessons up to 2 MiB (previously about 15 KB through the REST create API and 512 KiB per lesson). Rolling back to an earlier release keeps every document readable, but the older code refuses **any further edit** in a lesson whose total text exceeds 512 KiB ("Lesson storage limit exceeded"), and its REST create API returns to the ~15 KB limit. To edit such a lesson after a rollback, move or trim files until it is under 512 KiB (from a newer release), or roll forward again. No data is lost either way, and no schema change is involved.
 
 ## 4. Backup system
 

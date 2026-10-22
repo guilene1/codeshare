@@ -59,11 +59,28 @@ Blocks are standard fenced code blocks in the shared document, so they collabora
 
 All 15 languages are supported: Terraform/HCL, Python, Bash/Shell, YAML, JSON, JavaScript, TypeScript, Java, Go, Dockerfile, SQL, Markdown, HTML, CSS and plain text. HCL uses a custom tokenizer, not a Terraform language server.
 
+## File content API (tools such as Claude Code)
+
+Owners and Editors (session cookie, or `Authorization: Bearer <editor-link token>`) can create and update file text directly. Files are found by ID; the lesson is resolved automatically.
+
+```sh
+# Create (up to 1 MiB of text). Returns {id, version, bytes}.
+curl -X POST "$BASE/api/rooms/$ROOM/documents" -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d '{"filename":"notes.md","language":"markdown","content":"# Notes"}'
+# Read: {content, version, filename, language, folderId, bytes}; also sent as the ETag.
+curl "$BASE/api/rooms/$ROOM/documents/$FILE/content" -H "Authorization: Bearer $TOKEN"
+# Replace in place (same file ID, open editors update live). Raw text or JSON {"content": …}.
+curl -X PUT "$BASE/api/rooms/$ROOM/documents/$FILE/content" -H "Authorization: Bearer $TOKEN" \
+  -H "If-Match: $VERSION" -H "Content-Type: text/plain" --data-binary @notes.md
+```
+
+Updates must name the version they replace: without `If-Match` (or JSON `baseVersion`) the server answers 428; if the file changed since it was read (for example someone typed in the browser) it answers 409 with the current version and changes nothing. **`If-Match: *` is a force overwrite**: it replaces whatever the file contains, including edits made after you read it, so use it only when that is intended. It skips only the version check; size limits and Owner/Editor permission still apply. Text is stored with LF line endings (a file that already uses CRLF keeps CRLF). Reading follows workspace read access; writing needs Owner or Editor rights. Changes are recorded as "File edited" in workspace activity.
+
 ## Persistence and memory
 
 There is **no automatic course expiry or retention deletion**. Root files form the root lesson. Each folder has its own persisted Yjs snapshot and collaboration session. Opening one lesson loads only its code/snippets and lightweight explorer metadata; other lessons’ code remains in SQLite. Access/tree API reads do not load lesson documents.
 
-At most 16 lesson sessions are cached. After the last connection leaves, dirty state is flushed. Idle sessions are disposed after 30 seconds, checked every 15 seconds, without deleting data. Reopening reloads from SQLite. Bounds: 256 nested folders (12 levels), 2,048 files per course, 64 files per lesson, 1,000 snippets per lesson (64 KiB each), 512 KiB combined lesson text, 2 MiB CRDT state. There is no fixed viewer-count maximum. These document/session bounds protect the small server; use the load test to measure actual capacity.
+At most 16 lesson sessions are cached. After the last connection leaves, dirty state is flushed. Idle sessions are disposed after 30 seconds, checked every 15 seconds, without deleting data. Reopening reloads from SQLite. Bounds: 256 nested folders (12 levels), 2,048 files per course, 64 files per lesson, 1,000 snippets per lesson (64 KiB each), 1 MiB per file, 2 MiB combined lesson text (files and snippets), 8 MiB CRDT state. The same limits apply to REST uploads and live editing; oversized writes are refused with HTTP 413 (or a WebSocket close reason) naming the limit, and nothing is changed. There is no fixed viewer-count maximum. These document/session bounds protect the small server; use the load test to measure actual capacity.
 
 SQLite WAL checkpoints coalesce on a 1.5-second window rather than rewriting documents on each keystroke. Metadata changes persist explicitly; disconnects and graceful shutdown flush dirty state. Abrupt power loss can lose the newest uncheckpointed edit. Named Docker volumes survive restarts/reboots. **`docker compose down -v` deletes data and certificates.** Configure daily backups and test restores.
 

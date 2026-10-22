@@ -206,6 +206,12 @@ export default function CodeEditor({
       provider.awareness,
     );
     bindingRef.current = binding;
+    // Monaco gives text without line breaks the OS line ending (CRLF on Windows), which would
+    // store CRLF typing and pastes in shared text that LF editors read differently. Text with
+    // no "\r" is switched to LF. Inside the binding's mutex, so y-monaco does not replay the
+    // (character-identical) text into the shared document: nothing is sent, viewers included.
+    if (!file.content.toString().includes("\r"))
+      binding.mux(() => model.setEOL(monaco.editor.EndOfLineSequence.LF));
     const undo = new Y.UndoManager(file.content, {
       trackedOrigins: new Set([binding]),
     });

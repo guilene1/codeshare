@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type * as Y from "yjs";
-import { language, MAX_CONTENT, type Room } from "./rooms.js";
+import { language, lessonTooLarge, MAX_CONTENT, type Room } from "./rooms.js";
 
 export type CodeBlock = {
   id: string;
@@ -35,19 +35,23 @@ export function orderedBlocks(doc: Y.Doc) {
     (a, b) => a.position - b.position || a.id.localeCompare(b.id),
   );
 }
-export function validateBlockCapacity(
+// Everything a lesson holds (files plus code blocks) after writing `content`, excluding the
+// file or block it replaces. Shared by the file, code block and content-update APIs.
+export function validateLessonCapacity(
   room: Room,
   content: string,
-  replacing?: string,
+  replacing: { fileId?: string; blockId?: string } = {},
 ) {
   let bytes = Buffer.byteLength(content);
   for (const block of orderedBlocks(room.doc))
-    if (block.id !== replacing) bytes += Buffer.byteLength(block.content);
-  for (const file of room.doc.getMap<Y.Map<unknown>>("documents").values())
-    bytes += Buffer.byteLength((file.get("content") as Y.Text).toString());
-  if (bytes > MAX_CONTENT)
-    throw new Error("Workspace content limit exceeded (512 KB).");
+    if (block.id !== replacing.blockId) bytes += Buffer.byteLength(block.content);
+  for (const [id, file] of room.doc.getMap<Y.Map<unknown>>("documents"))
+    if (id !== replacing.fileId)
+      bytes += Buffer.byteLength((file.get("content") as Y.Text).toString());
+  if (bytes > MAX_CONTENT) throw lessonTooLarge(bytes);
 }
+export const validateBlockCapacity = (room: Room, content: string, replacing?: string) =>
+  validateLessonCapacity(room, content, { blockId: replacing });
 export function createBlock(room: Room, body: Record<string, unknown>) {
   const map = room.doc.getMap<CodeBlock>("codeBlocks");
   if (map.size >= MAX_BLOCKS)

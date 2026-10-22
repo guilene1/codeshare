@@ -1,6 +1,6 @@
 import type * as Y from "yjs";
 import { orderedBlocks, validateBlockCapacity } from "./blocks.js";
-import { addDocument, type Room } from "./rooms.js";
+import { addDocument, fileTooLarge, MAX_DOCUMENT, type Room } from "./rooms.js";
 
 export const SNIPPETS_MIGRATED = "snippetsToMarkdown";
 export function snippetsMigrated(doc: Y.Doc) {
@@ -38,6 +38,9 @@ export function migrateSnippets(room: Room) {
   );
   let name = "code-blocks.md";
   for (let n = 2; names.has(name); n++) name = `code-blocks-${n}.md`;
+  // Fences and headings add a little to the snippets, so check the file limit as well.
+  const bytes = Buffer.byteLength(markdown);
+  if (bytes > MAX_DOCUMENT) throw fileTooLarge(bytes);
   validateBlockCapacity(room, markdown);
   let id = "";
   room.doc.transact(() => {

@@ -5,7 +5,13 @@ import * as sync from "y-protocols/sync";
 import * as awareness from "y-protocols/awareness";
 import { WebSocket, WebSocketServer } from "ws";
 import type { Server } from "node:http";
-import { Rooms, validateDocument, type Actor, type Room } from "./rooms.js";
+import {
+  MAX_CONTENT,
+  Rooms,
+  validateDocument,
+  type Actor,
+  type Room,
+} from "./rooms.js";
 import {
   hashEditorToken,
   TOKEN_PATTERN,
@@ -93,7 +99,8 @@ export function setupWebsocket(
 ) {
   const wss = new WebSocketServer({
     noServer: true,
-    maxPayload: 2 * 1024 * 1024 + 256 * 1024,
+    // Fits one update replacing a whole 2 MB lesson (deletions plus insertions), with headroom.
+    maxPayload: 2 * MAX_CONTENT + 512 * 1024,
     perMessageDeflate: false,
     // Never echo the credential subprotocol in the handshake response.
     handleProtocols: (protocols) =>
@@ -312,16 +319,14 @@ export function setupWebsocket(
                 if (ownedElsewhere || (ids.size && !ids.has(id))) continue;
                 const state = JSON.parse(json);
                 if (!ids.size && state === null) continue;
-                if (
-                  state !== null &&
-                  editing &&
-                  !session &&
-                  (!state.user ||
-                    typeof state.user.name !== "string" ||
-                    state.user.name.length > 40 ||
-                    !/^#[0-9a-f]{6}$/i.test(state.user.color))
-                )
-                  throw new Error("Invalid presence");
+                // Private-link guests need not send presence metadata (y-websocket's default
+                // state is {}): without a usable name they appear as a neutral "Guest editor".
+                const guestName =
+                  typeof state?.user?.name === "string" &&
+                  state.user.name.trim() &&
+                  state.user.name.length <= 40
+                    ? (state.user.name as string)
+                    : "Guest editor";
                 if (state !== null) {
                   ids.add(id);
                   room.awarenessOwners.set(id, peer);
@@ -332,9 +337,9 @@ export function setupWebsocket(
                     live &&
                     editing &&
                     !session &&
-                    live.name !== state.user.name
+                    live.name !== guestName
                   ) {
-                    live.name = state.user.name;
+                    live.name = guestName;
                     rooms.schedulePresence(room.workspaceId);
                   }
                 }
@@ -348,7 +353,7 @@ export function setupWebsocket(
                             // Signed-in editors are shown by their verified account name.
                             name: session
                               ? session.user.displayName.slice(0, 40)
-                              : (state.user.name as string),
+                              : guestName,
                             color: /^#[0-9a-f]{6}$/i.test(state.user?.color)
                               ? state.user.color
                               : "#a78bfa",

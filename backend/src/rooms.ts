@@ -1,5 +1,5 @@
 import * as Y from "yjs";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { Awareness } from "y-protocols/awareness";
 import type { WebSocket } from "ws";
@@ -28,7 +28,62 @@ export const languages = [
   "css",
   "plaintext",
 ];
-export const MAX_CONTENT = 512 * 1024;
+// Text limits, enforced the same way on REST and WebSocket writes: one file, and everything a
+// lesson holds (files plus code blocks). The Yjs state may grow to 4x content (history).
+export const MAX_DOCUMENT = 1024 * 1024;
+export const MAX_CONTENT = 2 * 1024 * 1024;
+// Rounded up, so a size just over a limit never reads as the limit itself.
+export const formatSize = (bytes: number) =>
+  bytes >= 1024 * 1024
+    ? `${(Math.ceil((bytes / 1024 / 1024) * 100) / 100).toFixed(2)} MB`
+    : `${Math.ceil(bytes / 1024)} KB`;
+export const tooLarge = (message: string) =>
+  Object.assign(new Error(message), { status: 413 });
+// Messages stay under the 123-byte WebSocket close-reason limit.
+export const fileTooLarge = (bytes: number) =>
+  tooLarge(`Files can be up to 1 MB (this one would be ${formatSize(bytes)}).`);
+export const lessonTooLarge = (bytes: number) =>
+  tooLarge(
+    `Lessons can hold up to 2 MB of files and code blocks (this would be ${formatSize(bytes)}).`,
+  );
+// API text is stored with LF line endings, except in a file that already uses CRLF, which
+// keeps CRLF: editors map offsets by their model's line ending, so mixing the two in one
+// shared text would make open editors drift.
+export const normalizeNewlines = (text: string, like = "") => {
+  const lf = text.replace(/\r\n?/g, "\n");
+  return like.includes("\r\n") ? lf.replace(/\n/g, "\r\n") : lf;
+};
+// Content version for optimistic concurrency (If-Match / ETag).
+export const contentVersion = (text: string) =>
+  createHash("sha256").update(text).digest("hex").slice(0, 32);
+// Replaces a file's text with the smallest edit (shared prefix and suffix kept), in one
+// transaction, so open editors keep their cursors and the update stays small.
+export function replaceContent(room: Room, fileId: string, next: string, origin?: unknown) {
+  const item = room.doc.getMap<Y.Map<unknown>>("documents").get(fileId)!;
+  const text = item.get("content") as Y.Text,
+    current = text.toString();
+  if (current === next) return false;
+  const max = Math.min(current.length, next.length);
+  let start = 0;
+  while (start < max && current.charCodeAt(start) === next.charCodeAt(start)) start++;
+  // Never split a UTF-16 surrogate pair.
+  if (start > 0 && /[\ud800-\udbff]/.test(current[start - 1])) start--;
+  let end = 0;
+  while (
+    end < max - start &&
+    current.charCodeAt(current.length - 1 - end) === next.charCodeAt(next.length - 1 - end)
+  )
+    end++;
+  if (end > 0 && /[\udc00-\udfff]/.test(current[current.length - end])) end--;
+  room.doc.transact(() => {
+    const removed = current.length - start - end;
+    if (removed > 0) text.delete(start, removed);
+    const inserted = next.slice(start, next.length - end);
+    if (inserted) text.insert(start, inserted);
+    item.set("updatedAt", Date.now());
+  }, origin);
+  return true;
+}
 export function filename(value: unknown): string {
   if (
     typeof value !== "string" ||
@@ -142,7 +197,9 @@ export function validateDocument(doc: Y.Doc) {
       !Number.isSafeInteger(item.get("updatedAt"))
     )
       throw new Error("Invalid timestamp.");
-    size += Buffer.byteLength((item.get("content") as Y.Text).toString());
+    const bytes = Buffer.byteLength((item.get("content") as Y.Text).toString());
+    if (bytes > MAX_DOCUMENT) throw fileTooLarge(bytes);
+    size += bytes;
   }
   const blocks = orderedBlocks(doc);
   if (blocks.length > MAX_BLOCKS) throw new Error("Too many code blocks.");
@@ -152,11 +209,9 @@ export function validateDocument(doc: Y.Doc) {
       throw new Error("Invalid block position.");
     size += Buffer.byteLength(block.content);
   }
-  if (
-    size > MAX_CONTENT ||
-    Y.encodeStateAsUpdate(doc).byteLength > 4 * MAX_CONTENT
-  )
-    throw new Error(
+  if (size > MAX_CONTENT) throw lessonTooLarge(size);
+  if (Y.encodeStateAsUpdate(doc).byteLength > 4 * MAX_CONTENT)
+    throw tooLarge(
       "Lesson storage limit exceeded. Export your files or create another lesson.",
     );
 }
