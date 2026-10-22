@@ -5,7 +5,7 @@ import * as sync from "y-protocols/sync";
 import * as awareness from "y-protocols/awareness";
 import { WebSocket, WebSocketServer } from "ws";
 import type { Server } from "node:http";
-import { Rooms, validateDocument, type Room } from "./rooms.js";
+import { Rooms, validateDocument, type Actor, type Room } from "./rooms.js";
 import {
   hashEditorToken,
   TOKEN_PATTERN,
@@ -21,7 +21,26 @@ function send(peer: WebSocket, data: Uint8Array) {
     else peer.send(data);
   }
 }
-function wire(room: Room) {
+// Message type 4 (Kodelumi): JSON presence and activity, sent only to Owners and Editors.
+const MESSAGE_JSON = 4;
+function awarenessMessage(room: Room, ids: number[]) {
+  const enc = encoding.createEncoder();
+  encoding.writeVarUint(enc, 1);
+  encoding.writeVarUint8Array(
+    enc,
+    awareness.encodeAwarenessUpdate(room.awareness, ids),
+  );
+  return encoding.toUint8Array(enc);
+}
+// View-only (and untracked) sockets receive Editors' states (classroom cursors) but never
+// other viewers'.
+function sendAwareness(rooms: Rooms, room: Room, peer: WebSocket, ids: number[]) {
+  const visible = rooms.canSeePresence(peer)
+    ? ids
+    : ids.filter((id) => !room.viewerIds.has(id));
+  if (visible.length) send(peer, awarenessMessage(room, visible));
+}
+function wire(rooms: Rooms, room: Room) {
   if (room.dispose) return;
   const update = (data: Uint8Array) => {
     const enc = encoding.createEncoder();
@@ -44,18 +63,20 @@ function wire(room: Room) {
       removed.forEach((id) => ids?.delete(id));
     }
     removed.forEach((id) => room.awarenessOwners.delete(id));
-    const enc = encoding.createEncoder();
-    encoding.writeVarUint(enc, 1);
-    encoding.writeVarUint8Array(
-      enc,
-      awareness.encodeAwarenessUpdate(room.awareness, [
-        ...added,
-        ...updated,
-        ...removed,
-      ]),
-    );
-    for (const peer of room.peers.keys())
-      send(peer, encoding.toUint8Array(enc));
+    const ids = [...added, ...updated, ...removed],
+      editorIds = ids.filter((id) => !room.viewerIds.has(id));
+    let full: Uint8Array | undefined, editorsOnly: Uint8Array | undefined;
+    for (const peer of room.peers.keys()) {
+      if (rooms.canSeePresence(peer)) {
+        full ??= awarenessMessage(room, ids);
+        send(peer, full);
+      } else {
+        if (!editorIds.length) continue;
+        editorsOnly ??= awarenessMessage(room, editorIds);
+        send(peer, editorsOnly);
+      }
+    }
+    removed.forEach((id) => room.viewerIds.delete(id));
   };
   room.doc.on("update", update);
   room.awareness.on("update", presence);
@@ -78,6 +99,14 @@ export function setupWebsocket(
     handleProtocols: (protocols) =>
       protocols.has("devshare") ? "devshare" : false,
   });
+  rooms.sendJson = (peer, payload) => {
+    // Central gate for every presence/activity message, whatever the caller checked.
+    if (!rooms.canSeePresence(peer)) return;
+    const enc = encoding.createEncoder();
+    encoding.writeVarUint(enc, MESSAGE_JSON);
+    encoding.writeVarString(enc, JSON.stringify(payload));
+    send(peer, encoding.toUint8Array(enc));
+  };
   server.on("upgrade", (req, socket, head) => {
     const match = /^\/ws\/([A-Za-z0-9_-]{16})$/.exec(
       (req.url ?? "").split("?")[0],
@@ -114,13 +143,18 @@ export function setupWebsocket(
         sessionHash: session?.tokenHash,
         tokenHash: credentialHash,
       };
-      const canEdit = () =>
+      const access = () =>
         workspaceAccess(
           rooms.db,
           (hash, user) => accounts.sessionValid(hash, user),
           room.workspaceId,
           auth,
-        ) !== "viewer";
+        );
+      const canEdit = () => access() !== "viewer";
+      // Changes are attributed to the verified account, never to a self-entered name.
+      const actor: Actor = session
+        ? { kind: "user", id: session.user.id, name: session.user.displayName }
+        : { kind: "link" };
       if (
         credentials.length &&
         (credentials.length !== 1 ||
@@ -131,9 +165,17 @@ export function setupWebsocket(
         return;
       }
       wss.handleUpgrade(req, socket, head, (peer) => {
-        wire(room);
+        wire(rooms, room);
         room.peers.set(peer, new Set());
         rooms.connections.set(peer, { ...auth, workspaceId: room.workspaceId });
+        rooms.live.set(peer, {
+          workspaceId: room.workspaceId,
+          room,
+          access: access(),
+          userId: session?.user.id,
+          name: session?.user.displayName.slice(0, 40),
+        });
+        rooms.schedulePresence(room.workspaceId);
         room.touched = Date.now();
         let alive = true,
           count = 0,
@@ -241,6 +283,7 @@ export function setupWebsocket(
                   for (const id of changed)
                     before.get(id)?.set("updatedAt", Date.now());
                 });
+                for (const id of changed) rooms.noteEdit(room, id, actor);
               } else throw new Error("Unsupported sync message");
             } else if (type === 1) {
               const data = decoding.readVarUint8Array(dec);
@@ -282,6 +325,18 @@ export function setupWebsocket(
                 if (state !== null) {
                   ids.add(id);
                   room.awarenessOwners.set(id, peer);
+                  if (!editing) room.viewerIds.add(id);
+                  // A link guest's typed name is shown live to Owners and Editors only.
+                  const live = rooms.live.get(peer);
+                  if (
+                    live &&
+                    editing &&
+                    !session &&
+                    live.name !== state.user.name
+                  ) {
+                    live.name = state.user.name;
+                    rooms.schedulePresence(room.workspaceId);
+                  }
                 }
                 // Roles are generated from the verified socket credential, never browser state.
                 const safeState =
@@ -324,15 +379,9 @@ export function setupWebsocket(
                 );
               }
             } else if (type === 3) {
-              const enc = encoding.createEncoder();
-              encoding.writeVarUint(enc, 1);
-              encoding.writeVarUint8Array(
-                enc,
-                awareness.encodeAwarenessUpdate(room.awareness, [
-                  ...room.awareness.getStates().keys(),
-                ]),
-              );
-              send(peer, encoding.toUint8Array(enc));
+              sendAwareness(rooms, room, peer, [
+                ...room.awareness.getStates().keys(),
+              ]);
             }
           } catch (error) {
             console.warn(
@@ -346,6 +395,8 @@ export function setupWebsocket(
         peer.on("close", () => {
           clearInterval(heartbeat);
           rooms.connections.delete(peer);
+          rooms.live.delete(peer);
+          rooms.schedulePresence(room.workspaceId);
           const ids = room.peers.get(peer);
           for (const id of ids ?? []) room.awarenessOwners.delete(id);
           room.peers.delete(peer);
@@ -363,15 +414,7 @@ export function setupWebsocket(
         // A viewer only pulls server state; do not request its potentially modified local document.
         if (canEdit()) send(peer, encoding.toUint8Array(enc));
         const states = [...room.awareness.getStates().keys()];
-        if (states.length) {
-          const e = encoding.createEncoder();
-          encoding.writeVarUint(e, 1);
-          encoding.writeVarUint8Array(
-            e,
-            awareness.encodeAwarenessUpdate(room.awareness, states),
-          );
-          send(peer, encoding.toUint8Array(e));
-        }
+        if (states.length) sendAwareness(rooms, room, peer, states);
       });
     } catch {
       socket.write(

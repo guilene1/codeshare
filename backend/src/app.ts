@@ -6,7 +6,14 @@ import { resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { openDatabase } from "./database.js";
-import { Rooms, addDocument, filename, language } from "./rooms.js";
+import {
+  Rooms,
+  CONTENT_ACTIONS,
+  activityEntry,
+  addDocument,
+  filename,
+  language,
+} from "./rooms.js";
 import { Images, MAX_IMAGE_BYTES, fetchImage } from "./images.js";
 import { setupWebsocket } from "./websocket.js";
 import * as Y from "yjs";
@@ -258,6 +265,7 @@ export function createApp(
         req.body.template,
         description.trim(),
         session.user.id,
+        { kind: "user", id: session.user.id, name: session.user.displayName },
       );
       res.status(201).json({ id: room.id, name: room.name });
     },
@@ -302,6 +310,12 @@ export function createApp(
     res.locals.access = access;
     res.locals.linkValid = linkValid;
     res.locals.canEdit = access !== "viewer";
+    // Who a change is attributed to: the verified account, else a private-link guest.
+    res.locals.actor = session
+      ? { kind: "user", id: session.user.id, name: session.user.displayName }
+      : access !== "viewer"
+        ? { kind: "link" }
+        : undefined;
     // Owners manage their workspace; unclaimed legacy workspaces keep v1 link management.
     res.locals.canManage =
       access === "owner" || (access === "editor" && !room.owner_id);
@@ -366,6 +380,35 @@ export function createApp(
         .all(id),
     });
   });
+  // Recent content activity for Owners and Editors. Viewers get the same 404 as an unknown
+  // endpoint, so the response reveals nothing. Paged by (created_at, id) cursor.
+  app.get("/api/rooms/:roomId/activity", (req, res) => {
+    if (!res.locals.canEdit) {
+      res.status(404).json({ error: "Endpoint not found." });
+      return;
+    }
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
+    const before = Number(req.query.before),
+      beforeId = typeof req.query.beforeId === "string" ? req.query.beforeId : "";
+    const cursor = Number.isSafeInteger(before) && before > 0;
+    const actions = CONTENT_ACTIONS.map(() => "?").join(",");
+    const rows = rooms.db
+      .prepare(
+        `SELECT id,action,label,created_at,actor_name,actor_kind FROM activity WHERE workspace_id=? AND action IN (${actions})` +
+          (cursor ? " AND (created_at<? OR (created_at=? AND id<?))" : "") +
+          " ORDER BY created_at DESC,id DESC LIMIT ?",
+      )
+      .all(
+        res.locals.workspace.id,
+        ...CONTENT_ACTIONS,
+        ...(cursor ? [before, before, beforeId] : []),
+        limit + 1,
+      );
+    res.json({
+      entries: rows.slice(0, limit).map(activityEntry),
+      hasMore: rows.length > limit,
+    });
+  });
   app.use("/api/rooms/:roomId", (req, res, next) => {
     if (req.method !== "GET" && !res.locals.canEdit) {
       res.status(403).json({
@@ -406,7 +449,7 @@ export function createApp(
         .json({ error: "This workspace already belongs to another account." });
       return;
     }
-    rooms.record(room.id, "workspace.claimed", session.user.displayName);
+    rooms.record(room.id, "workspace.claimed", session.user.displayName, res.locals.actor);
     res.json({ ok: true });
   });
   app.use("/api/rooms/:roomId/editor-link", (_req, res, next) => {
@@ -436,7 +479,7 @@ export function createApp(
       .prepare("UPDATE rooms SET editor_token_hash=? WHERE id=?")
       .run(hashEditorToken(token), id);
     dropLinkEditors(previous);
-    rooms.record(id, previous ? "link.replaced" : "link.created", "Editor link");
+    rooms.record(id, previous ? "link.replaced" : "link.created", "Editor link", res.locals.actor);
     res.status(201).json({ token });
   });
   app.delete("/api/rooms/:roomId/editor-link", (_req, res) => {
@@ -448,7 +491,7 @@ export function createApp(
       .prepare("UPDATE rooms SET editor_token_hash=NULL WHERE id=?")
       .run(id);
     dropLinkEditors(previous);
-    if (previous) rooms.record(id, "link.revoked", "Editor link");
+    if (previous) rooms.record(id, "link.revoked", "Editor link", res.locals.actor);
     res.json({ ok: true });
   });
   // Account sharing: owners add existing registered users as Viewer or Editor. This only
@@ -517,7 +560,7 @@ export function createApp(
         )
         .run(id, user.id as string, role, session.user.id, now, now);
       dropShareSockets(id, user.id as string);
-      rooms.record(id, "share.added", `${user.display_name} (${role})`);
+      rooms.record(id, "share.added", `${user.display_name} (${role})`, res.locals.actor);
       res.status(201).json({ shares: shareList(id) });
     },
   );
@@ -538,6 +581,7 @@ export function createApp(
       id,
       "share.changed",
       `${userName(req.params.userId)} (${req.body.role})`,
+      res.locals.actor,
     );
     res.json({ shares: shareList(id) });
   });
@@ -549,7 +593,7 @@ export function createApp(
       .run(id, req.params.userId).changes;
     if (removed) {
       dropShareSockets(id, req.params.userId);
-      rooms.record(id, "share.removed", name);
+      rooms.record(id, "share.removed", name, res.locals.actor);
     }
     res.json({ shares: shareList(id) });
   });
@@ -571,7 +615,7 @@ export function createApp(
     rooms.db
       .prepare("UPDATE rooms SET name=? WHERE id=?")
       .run(name.trim(), room.id);
-    rooms.record(room.id, "workspace.renamed", name.trim());
+    rooms.record(room.id, "workspace.renamed", name.trim(), res.locals.actor);
     for (const session of rooms.active.values())
       if (session.workspaceId === room.id) {
         session.name = name.trim();
@@ -608,7 +652,7 @@ export function createApp(
     (req, res) => {
       const data = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
       const image = images.store(res.locals.workspace.id, data);
-      rooms.record(res.locals.workspace.id, "image", "Added an image");
+      rooms.record(res.locals.workspace.id, "image", "Added an image", res.locals.actor);
       res.status(201).json(image);
     },
   );
@@ -617,7 +661,7 @@ export function createApp(
       if (typeof req.body?.url !== "string" || req.body.url.length > 2048)
         throw Object.assign(new Error("Enter an image link."), { status: 400 });
       const image = images.store(res.locals.workspace.id, await fetchImage(req.body.url));
-      rooms.record(res.locals.workspace.id, "image", "Added an image");
+      rooms.record(res.locals.workspace.id, "image", "Added an image", res.locals.actor);
       res.status(201).json(image);
     } catch (error) {
       next(error);
@@ -680,7 +724,7 @@ export function createApp(
         Y.encodeStateAsUpdate(doc),
       );
     doc.destroy();
-    rooms.record(workspaceId, "folder.created", name);
+    rooms.record(workspaceId, "folder.created", name, res.locals.actor);
     rooms.syncCatalog(workspaceId);
     res.status(201).json({ id });
   });
@@ -725,7 +769,7 @@ export function createApp(
       res.status(404).json({ error: "Folder not found." });
       return;
     }
-    rooms.record(res.locals.workspace.id, "folder.renamed", name);
+    rooms.record(res.locals.workspace.id, "folder.renamed", name, res.locals.actor);
     rooms.syncCatalog(res.locals.workspace.id);
     res.json({ ok: true });
   });
@@ -756,7 +800,7 @@ export function createApp(
     rooms.db
       .prepare("DELETE FROM folders WHERE id=? AND workspace_id=?")
       .run(req.params.id, workspaceId);
-    rooms.record(workspaceId, "folder.deleted", String(folderName));
+    rooms.record(workspaceId, "folder.deleted", String(folderName), res.locals.actor);
     rooms.syncCatalog(workspaceId);
     res.json({ ok: true });
   });
@@ -786,6 +830,7 @@ export function createApp(
         res.locals.room.workspaceId,
         "blocks.migrated",
         `${result.migrated} snippets`,
+        res.locals.actor,
       );
       rooms.syncCatalog(res.locals.room.workspaceId);
     }
@@ -817,6 +862,7 @@ export function createApp(
       res.locals.room.workspaceId,
       "file.created",
       req.body.filename,
+      res.locals.actor,
     );
     rooms.syncCatalog(res.locals.room.workspaceId);
     res.status(201).json({ id });
@@ -869,7 +915,7 @@ export function createApp(
       doc.set("updatedAt", Date.now());
     });
     rooms.save(room);
-    if (name) rooms.record(room.workspaceId, "file.renamed", name);
+    if (name) rooms.record(room.workspaceId, "file.renamed", name, res.locals.actor);
     rooms.syncCatalog(room.workspaceId);
     res.json({ ok: true });
   });
@@ -884,7 +930,7 @@ export function createApp(
     ) as string;
     docs.delete(req.params.id);
     rooms.save(res.locals.room);
-    rooms.record(res.locals.room.workspaceId, "file.deleted", deletedName);
+    rooms.record(res.locals.room.workspaceId, "file.deleted", deletedName, res.locals.actor);
     rooms.syncCatalog(res.locals.room.workspaceId);
     res.json({ ok: true });
   });
@@ -902,6 +948,7 @@ export function createApp(
       res.locals.room.workspaceId,
       "block.created",
       block.title || "Code snippet",
+      res.locals.actor,
     );
     res.status(201).json({ id: block.id });
   });
@@ -925,6 +972,7 @@ export function createApp(
       room.workspaceId,
       "block.updated",
       fields.title || "Code snippet",
+      res.locals.actor,
     );
     res.json({ ok: true });
   });
@@ -948,6 +996,7 @@ export function createApp(
       room.workspaceId,
       "block.deleted",
       deletedTitle || "Code snippet",
+      res.locals.actor,
     );
     res.json({ ok: true });
   });

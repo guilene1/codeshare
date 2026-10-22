@@ -1324,6 +1324,185 @@ option {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Owner/Editor presence and activity summary, inside the existing views bar. */
+.workspace-activity {
+  position: relative;
+  min-width: 0;
+}
+.workspace-views .activity-summary {
+  max-width: 100%;
+  gap: 8px;
+  padding: 5px 10px;
+  border-color: var(--border);
+  background: var(--surface);
+  font-size: 11px;
+}
+.workspace-views .activity-summary .live-dot {
+  padding: 0;
+  border: 0;
+  background: #48c99e;
+}
+.workspace-views .activity-summary span:not(.live-dot) {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 11px;
+}
+.activity-online {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.workspace-views .activity-summary .activity-online {
+  color: var(--text);
+  font-weight: 600;
+}
+.workspace-views .activity-summary .activity-last {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.activity-summary > svg {
+  flex-shrink: 0;
+}
+.activity-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  width: 340px;
+  max-width: calc(100vw - 32px);
+  max-height: min(70vh, 560px);
+  overflow: auto;
+  padding: 10px 14px 6px;
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  font-size: 12px;
+  color: var(--text);
+}
+.activity-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 6px;
+}
+.activity-panel section {
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+.activity-panel h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+}
+.activity-panel h3 span {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--surface);
+  letter-spacing: 0;
+}
+.activity-people,
+.activity-list {
+  display: grid;
+  gap: 7px;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.activity-people li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.activity-name,
+.activity-target,
+.activity-last-details dd {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.activity-name small {
+  color: var(--faint);
+}
+.activity-role {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.activity-role.owner,
+.activity-role.editor {
+  border-color: transparent;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.activity-anonymous,
+.activity-empty {
+  color: var(--muted);
+}
+.activity-last-details {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 5px 14px;
+  margin: 0;
+}
+.activity-last-details dt {
+  color: var(--muted);
+}
+.activity-last-details dd {
+  margin: 0;
+}
+.activity-list li > div {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+.activity-list strong {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.activity-list .activity-target {
+  color: var(--muted);
+}
+.activity-list small {
+  color: var(--faint);
+  font-size: 11px;
+}
+.workspace-views .activity-panel .activity-more {
+  margin-top: 8px;
+  padding: 4px 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+}
+@media (max-width: 800px) {
+  .workspace-views .activity-summary .activity-last {
+    display: none;
+  }
+}
+@media (max-width: 560px) {
+  .activity-panel {
+    position: fixed;
+    top: 112px;
+    left: 12px;
+    right: 12px;
+    width: auto;
+    max-width: none;
+  }
+}
 .course-explorer {
   padding: 0 8px 16px;
   overflow: auto;

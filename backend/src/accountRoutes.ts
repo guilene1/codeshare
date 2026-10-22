@@ -341,7 +341,11 @@ export function accountRoutes(
           auth.userId === session.user.id && auth.workspaceId === workspaceId,
         "You left this shared workspace",
       );
-      rooms.record(workspaceId, "share.left", session.user.displayName);
+      rooms.record(workspaceId, "share.left", session.user.displayName, {
+        kind: "user",
+        id: session.user.id,
+        name: session.user.displayName,
+      });
     }
     res.json({ ok: true });
   });

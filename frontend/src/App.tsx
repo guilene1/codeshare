@@ -48,6 +48,7 @@ import {
   UserPlus,
 } from "lucide-react";
 import * as Y from "yjs";
+import * as decoding from "lib0/decoding";
 import { WebsocketProvider } from "y-websocket";
 import type { editor } from "monaco-editor";
 import Modal from "./components/Modal";
@@ -67,10 +68,12 @@ import {
   SignUp,
 } from "./components/AuthPages";
 import { AuthContext, loadSession, useAuth, type AuthState, type User } from "./auth";
+import { plural, type Activity, type PresenceSummary } from "./workspaces";
 import { fence, imageMarkdown, insertBlock, isDocumentLanguage } from "./markdown";
 import { BRAND, Logo, LogoMark, TAGLINE } from "./brand";
 import CourseExplorer from "./components/CourseExplorer";
 import ExplorerResizer, { clampExplorerWidth } from "./components/ExplorerResizer";
+import WorkspaceActivity from "./components/WorkspaceActivity";
 import { ClassroomAwareness } from "./components/ClassroomAwareness";
 import {
   api,
@@ -109,6 +112,9 @@ type Person = {
   fileId?: string;
   role: "editor" | "viewer";
 };
+// Stable avatar colour for a name in the Connected list.
+const nameColor = (name: string) =>
+  colors[[...name].reduce((sum, c) => sum + c.charCodeAt(0), 0) % colors.length];
 const colors = [
   "#a78bfa",
   "#38bdf8",
@@ -648,7 +654,11 @@ function Workspace({
     [pendingOpen, setPendingOpen] = useState<string | null>(null),
     [active, setActive] = useState(""),
     [people, setPeople] = useState<Person[]>([]),
-    [viewerCount, setViewerCount] = useState(0),
+    // Owner/Editor only: live presence and content activity pushed by the server.
+    [presence, setPresence] = useState<PresenceSummary | null>(null),
+    [activity, setActivity] = useState<Activity[]>([]),
+    [activityMore, setActivityMore] = useState(false),
+    [activityLoading, setActivityLoading] = useState(false),
     [status, setStatus] = useState("connecting"),
     [synced, setSynced] = useState(false),
     [saved, setSaved] = useState(true);
@@ -696,8 +706,7 @@ function Workspace({
     : undefined;
   const isOwner = room?.access === "owner";
   const isEditor = isOwner || room?.access === "editor";
-  const anonymousViewers =
-    viewerCount + (viewerCount === 1 ? " anonymous viewer" : " anonymous viewers");
+  const anonymousViewers = plural(presence?.anonymous ?? 0, "anonymous viewer");
   // Viewers always read documents in the formatted Preview; only editors switch views.
   const markdownMode = isEditor ? chosenMode : "preview";
   // Owners manage the workspace; unclaimed v1 workspaces keep link-based management.
@@ -1113,13 +1122,9 @@ function Workspace({
     };
     const presence = () => {
       const result: Person[] = [];
-      let viewers = 0;
       p.awareness.getStates().forEach((s, key) => {
         const editor = key === p.doc.clientID ? isEditor : s.role === "editor";
-        if (!editor) {
-          viewers++;
-          return;
-        }
+        if (!editor) return;
         if (s.user)
           result.push({
             id: key,
@@ -1137,7 +1142,6 @@ function Workspace({
           });
       });
       setPeople(result);
-      setViewerCount(viewers);
       const me = result.find((person) => person.id === p.doc.clientID);
       if (
         me &&
@@ -1161,7 +1165,11 @@ function Workspace({
     };
     const connection = ({ status }: { status: string }) => {
       setStatus(status);
-      if (status !== "connected") setSynced(false);
+      if (status !== "connected") {
+        setSynced(false);
+        // Never show a stale count; the server re-sends presence after reconnecting.
+        setPresence(null);
+      }
     };
     const sync = (value: boolean) => setSynced(value);
     const close = (event: CloseEvent | null) => {
@@ -1193,6 +1201,23 @@ function Workspace({
           }, 2200);
       }
     };
+    // Kodelumi message type 4: presence and activity, sent by the server to Owners and
+    // Editors only.
+    setPresence(null);
+    p.messageHandlers[4] = (_encoder, decoder) => {
+      const message = JSON.parse(decoding.readVarString(decoder)) as {
+        presence?: PresenceSummary;
+        activity?: Activity;
+      };
+      if (message.presence) setPresence(message.presence);
+      const entry = message.activity;
+      if (entry)
+        setActivity((list) =>
+          [entry, ...list.filter((item) => item.id !== entry.id)].sort(
+            (a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id),
+          ),
+        );
+    };
     doc.on("update", changed);
     p.on("status", connection);
     p.on("sync", sync);
@@ -1215,6 +1240,40 @@ function Workspace({
   useEffect(() => {
     if (current) provider?.awareness.setLocalStateField("fileId", current.id);
   }, [current?.id, provider]);
+  // Recent activity loads on each (re)connect; live changes then arrive over the socket.
+  useEffect(() => {
+    if (!isEditor || status !== "connected") return;
+    let canceled = false;
+    roomApi<{ entries: Activity[]; hasMore: boolean }>(`/rooms/${id}/activity`)
+      .then((page) => {
+        if (canceled) return;
+        setActivity(page.entries);
+        setActivityMore(page.hasMore);
+      })
+      .catch(() => {});
+    return () => {
+      canceled = true;
+    };
+  }, [isEditor, status, id]);
+  async function loadMoreActivity() {
+    const last = activity.at(-1);
+    if (!last) return;
+    setActivityLoading(true);
+    try {
+      const page = await roomApi<{ entries: Activity[]; hasMore: boolean }>(
+        `/rooms/${id}/activity?before=${last.created_at}&beforeId=${encodeURIComponent(last.id)}`,
+      );
+      setActivity((list) => [
+        ...list,
+        ...page.entries.filter((item) => !list.some((known) => known.id === item.id)),
+      ]);
+      setActivityMore(page.hasMore);
+    } catch (e) {
+      notify((e as Error).message);
+    } finally {
+      setActivityLoading(false);
+    }
+  }
   useEffect(() => {
     if (!provider) return;
     const style = document.createElement("style");
@@ -1477,8 +1536,10 @@ function Workspace({
               title={`${anonymousViewers} online`}
             >
               <Users size={16} />
-              {viewerCount}
-              <span className="viewer-count-label">{" viewers"}</span>
+              {presence?.anonymous ?? 0}
+              <span className="viewer-count-label">
+                {presence?.anonymous === 1 ? " viewer" : " viewers"}
+              </span>
             </span>
           )}
           {/* View-only readers get no built-in Copy controls, including link copying. */}
@@ -1585,16 +1646,25 @@ function Workspace({
             {isEditor && (
               <div className="sidebar-people">
                 <div className="sidebar-heading">
-                  CONNECTED<span>{people.length + viewerCount}</span>
+                  CONNECTED<span>{presence?.total ?? 0}</span>
                 </div>
                 <p className="anonymous-viewers">
                   {anonymousViewers}
                 </p>
-                {people.map((p) => (
-                  <div className="person" key={p.id}>
+                {[
+                  ...(presence?.users ?? []),
+                  ...(presence?.guests ?? []).map((guest) => ({
+                    ...guest,
+                    role: "guest" as const,
+                  })),
+                ].map((p, index) => (
+                  <div className="person" key={index}>
                     <span
                       className="avatar"
-                      style={{ background: p.color + "25", color: p.color }}
+                      style={{
+                        background: nameColor(p.name) + "25",
+                        color: nameColor(p.name),
+                      }}
                     >
                       {initials(p.name)}
                     </span>
@@ -1602,9 +1672,15 @@ function Workspace({
                       {p.name}
                       <small className="person-role">
                         {" "}
-                        {p.role === "editor" ? "Editor" : "Viewer"}
+                        {p.role === "owner"
+                          ? "Owner"
+                          : p.role === "editor"
+                            ? "Editor"
+                            : p.role === "guest"
+                              ? "Guest editor"
+                              : "Viewer"}
                       </small>
-                      {p.id === provider?.doc.clientID && <small> (you)</small>}
+                      {p.you && <small> (you)</small>}
                     </span>
                     <span className="live-dot" />
                   </div>
@@ -1650,6 +1726,15 @@ function Workspace({
             >
               <PanelLeft size={16} />
             </button>
+            {isEditor && (
+              <WorkspaceActivity
+                presence={presence}
+                entries={activity}
+                hasMore={activityMore}
+                loading={activityLoading}
+                onLoadMore={() => void loadMoreActivity()}
+              />
+            )}
             <span className="lesson-name">
               {folder
                 ? tree.folders.find((item) => item.id === folder)?.name

@@ -117,5 +117,16 @@ export function openDatabase(path: string) {
       PRIMARY KEY (workspace_id, user_id)
     );
     CREATE INDEX IF NOT EXISTS shares_user ON workspace_shares(user_id, updated_at DESC);`);
+  // Activity attribution (additive, nullable): older rows stay unattributed. actor_kind is
+  // 'user' for a signed-in account or 'link' for a private editor-link guest.
+  const activityColumns = db.prepare("PRAGMA table_info(activity)").all();
+  if (!activityColumns.some((column) => column.name === "actor_id"))
+    db.exec(
+      "ALTER TABLE activity ADD COLUMN actor_id TEXT REFERENCES users(id) ON DELETE SET NULL",
+    );
+  if (!activityColumns.some((column) => column.name === "actor_name"))
+    db.exec("ALTER TABLE activity ADD COLUMN actor_name TEXT");
+  if (!activityColumns.some((column) => column.name === "actor_kind"))
+    db.exec("ALTER TABLE activity ADD COLUMN actor_kind TEXT");
   return db;
 }

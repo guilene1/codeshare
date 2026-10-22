@@ -4,7 +4,68 @@ export type Activity = {
   action: string;
   label: string;
   created_at: number;
+  // Present on workspace activity for Owners and Editors; null for unattributed history.
+  actor?: { kind: "user"; name: string } | { kind: "link" } | null;
 };
+// Live presence for Owners and Editors (pushed over the workspace WebSocket).
+export type PresenceSummary = {
+  total: number;
+  users: Array<{ name: string; role: "owner" | "editor" | "viewer"; you: boolean }>;
+  guests: Array<{ name: string; you: boolean }>;
+  anonymous: number;
+};
+export const plural = (count: number, word: string) =>
+  `${count} ${word}${count === 1 ? "" : "s"}`;
+// Neutral attribution: verified account names only, never a guess.
+export function actorName(actor: Activity["actor"]) {
+  if (actor?.kind === "user") return actor.name;
+  return actor?.kind === "link" ? "Guest editor" : "Unknown";
+}
+const changes: Record<string, string> = {
+  "workspace.created": "Workspace created",
+  "workspace.renamed": "Workspace renamed",
+  "folder.created": "Folder created",
+  "folder.renamed": "Folder renamed",
+  "folder.deleted": "Folder deleted",
+  "file.created": "File created",
+  "file.edited": "File edited",
+  "file.renamed": "File renamed",
+  "file.deleted": "File deleted",
+  "block.created": "Code block added",
+  "block.updated": "Code block updated",
+  "block.deleted": "Code block deleted",
+  "blocks.migrated": "Snippets moved into a lesson",
+  image: "Image added",
+};
+export const changeLabel = (action: string) =>
+  changes[action] ?? "Workspace content updated";
+// The affected file or folder, when the record names one.
+export const changeTarget = (item: Activity) =>
+  item.action === "image" ? "" : item.label;
+export const targetKind = (action: string) =>
+  action.startsWith("folder.")
+    ? "Folder"
+    : action.startsWith("file.")
+      ? "File"
+      : action.startsWith("workspace.")
+        ? "Workspace"
+        : action.startsWith("block")
+          ? "Code block"
+          : "Item";
+// "Today at 2:35 PM", "Yesterday at 9:05 AM", else "Oct 18 at 2:35 PM", in local time.
+export function whenLabel(time: number, now = new Date()) {
+  const date = new Date(time),
+    clock = date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  const day = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const days = Math.round((day(now) - day(date)) / 86_400_000);
+  if (days === 0) return `Today at ${clock}`;
+  if (days === 1) return `Yesterday at ${clock}`;
+  return `${date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    ...(date.getFullYear() === now.getFullYear() ? {} : { year: "numeric" }),
+  })} at ${clock}`;
+}
 // A workspace owned by the signed-in account (from /api/me/workspaces).
 export type OwnedWorkspace = {
   id: string;
@@ -77,6 +138,7 @@ export function activityText(item: Activity) {
     "folder.renamed": "Renamed folder",
     "folder.deleted": "Deleted folder",
     "file.created": "Created",
+    "file.edited": "Edited",
     "file.renamed": "Renamed file",
     "file.deleted": "Deleted file",
     "block.created": "Added code block",

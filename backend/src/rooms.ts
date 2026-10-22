@@ -3,7 +3,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { Awareness } from "y-protocols/awareness";
 import type { WebSocket } from "ws";
-import { equalHash, type Auth } from "./access.js";
+import { equalHash, type Access, type Auth } from "./access.js";
 import { blockFields, MAX_BLOCKS, orderedBlocks } from "./blocks.js";
 import { templates } from "./templates.js";
 
@@ -47,6 +47,65 @@ export function language(value: unknown): string {
     throw new Error("Choose a supported language.");
   return value;
 }
+// Who made a change: a verified account, or a private editor-link guest (whose
+// self-entered name is never stored).
+export type Actor = { kind: "user"; id: string; name: string } | { kind: "link" };
+// Workspace content changes Owners and Editors see. Sharing and link management stay
+// owner-only (the dashboard), so they are never sent to Editors.
+export const CONTENT_ACTIONS = [
+  "workspace.created",
+  "workspace.renamed",
+  "folder.created",
+  "folder.renamed",
+  "folder.deleted",
+  "file.created",
+  "file.edited",
+  "file.renamed",
+  "file.deleted",
+  "block.created",
+  "block.updated",
+  "block.deleted",
+  "blocks.migrated",
+  "image",
+];
+export type ActivityEntry = {
+  id: string;
+  action: string;
+  label: string;
+  created_at: number;
+  actor: { kind: "user"; name: string } | { kind: "link" } | null;
+};
+export function activityEntry(row: Record<string, unknown>): ActivityEntry {
+  return {
+    id: row.id as string,
+    action: row.action as string,
+    label: row.label as string,
+    created_at: row.created_at as number,
+    actor:
+      row.actor_kind === "user" && typeof row.actor_name === "string"
+        ? { kind: "user", name: row.actor_name }
+        : row.actor_kind === "link"
+          ? { kind: "link" }
+          : null,
+  };
+}
+// Consecutive edits of one file by one person within this window update a single row.
+export const EDIT_WINDOW_MS = 10 * 60_000;
+// One live socket, for the Owner/Editor presence summary. A share or link change closes
+// the socket, so its access cannot go stale.
+export type Live = {
+  workspaceId: string;
+  room: Room;
+  access: Access;
+  userId?: string;
+  name?: string;
+};
+export type PresenceSummary = {
+  total: number;
+  users: Array<{ name: string; role: Access; you: boolean }>;
+  guests: Array<{ name: string; you: boolean }>;
+  anonymous: number;
+};
 export type Room = {
   id: string;
   workspaceId: string;
@@ -56,6 +115,10 @@ export type Room = {
   awareness: Awareness;
   peers: Map<WebSocket, Set<number>>;
   awarenessOwners: Map<number, WebSocket>;
+  // Awareness IDs owned by view-only sockets; only Owners and Editors receive them.
+  viewerIds: Set<number>;
+  // Text edits since the last checkpoint, keyed by file and person.
+  edits: Map<string, { fileId: string; actor?: Actor }>;
   dirty: boolean;
   touched: number;
   timer?: ReturnType<typeof setTimeout>;
@@ -130,6 +193,10 @@ export class Rooms {
   active = new Map<string, Room>();
   // Credentials behind each live socket, so revoked sessions/links can be disconnected.
   connections = new Map<WebSocket, Auth>();
+  live = new Map<WebSocket, Live>();
+  // Set by the WebSocket server: delivers a JSON message to one socket.
+  sendJson?: (peer: WebSocket, payload: unknown) => void;
+  private presenceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   constructor(
     public db: DatabaseSync,
     public checkpointMs = 1500,
@@ -142,6 +209,7 @@ export class Rooms {
     template?: string,
     description = "",
     ownerId: string | null = null,
+    actor?: Actor,
   ) {
     const id = randomBytes(12).toString("base64url"),
       now = Date.now(),
@@ -192,7 +260,7 @@ export class Rooms {
       );
     this.save(room);
     this.syncCatalog(id);
-    this.record(id, "workspace.created", name);
+    this.record(id, "workspace.created", name, actor);
     return room;
   }
   make(
@@ -215,6 +283,8 @@ export class Rooms {
       awareness: new Awareness(doc),
       peers: new Map(),
       awarenessOwners: new Map(),
+      viewerIds: new Set(),
+      edits: new Map(),
       dirty: false,
       touched: Date.now(),
     };
@@ -242,16 +312,129 @@ export class Rooms {
       )
       .get(id);
   }
-  record(workspaceId: string, action: string, label: string) {
-    const now = Date.now();
+  record(workspaceId: string, action: string, label: string, actor?: Actor) {
+    const now = Date.now(),
+      id = randomUUID();
     this.db
       .prepare(
-        "INSERT INTO activity(id,workspace_id,action,label,created_at) VALUES (?,?,?,?,?)",
+        "INSERT INTO activity(id,workspace_id,action,label,created_at,actor_id,actor_name,actor_kind) VALUES (?,?,?,?,?,?,?,?)",
       )
-      .run(randomUUID(), workspaceId, action, label.slice(0, 120), now);
+      .run(
+        id,
+        workspaceId,
+        action,
+        label.slice(0, 120),
+        now,
+        actor?.kind === "user" ? actor.id : null,
+        actor?.kind === "user" ? actor.name.slice(0, 40) : null,
+        actor?.kind ?? null,
+      );
     this.db
       .prepare("UPDATE rooms SET updated_at=? WHERE id=?")
       .run(now, workspaceId);
+    this.announce(workspaceId, action, id);
+  }
+  // Deny by default: only sockets tracked as Owner or Editor may receive presence,
+  // activity or other viewers' awareness. Viewers and untracked sockets get none of it.
+  canSeePresence(peer: WebSocket) {
+    const access = this.live.get(peer)?.access;
+    return access === "owner" || access === "editor";
+  }
+  // Sends a new or refreshed content activity row to the workspace's Owners and Editors.
+  private announce(workspaceId: string, action: string, id: string) {
+    if (!this.sendJson || !CONTENT_ACTIONS.includes(action)) return;
+    let row: Record<string, unknown> | undefined;
+    for (const [peer, live] of this.live)
+      if (live.workspaceId === workspaceId && this.canSeePresence(peer)) {
+        row ??= this.db
+          .prepare(
+            "SELECT id,action,label,created_at,actor_name,actor_kind FROM activity WHERE id=?",
+          )
+          .get(id);
+        if (row) this.sendJson(peer, { activity: activityEntry(row) });
+      }
+  }
+  // One "file.edited" row per file and person per EDIT_WINDOW_MS: later edits in the window
+  // only move its timestamp, so typing never writes a row per keystroke.
+  private recordEdit(workspaceId: string, label: string, actor?: Actor) {
+    const now = Date.now();
+    const recent = this.db
+      .prepare(
+        "SELECT id FROM activity WHERE workspace_id=? AND created_at>? AND action='file.edited' AND label=? AND actor_kind IS ? AND actor_id IS ? ORDER BY created_at DESC LIMIT 1",
+      )
+      .get(
+        workspaceId,
+        now - EDIT_WINDOW_MS,
+        label.slice(0, 120),
+        actor?.kind ?? null,
+        actor?.kind === "user" ? actor.id : null,
+      );
+    if (!recent) {
+      this.record(workspaceId, "file.edited", label, actor);
+      return;
+    }
+    this.db
+      .prepare("UPDATE activity SET created_at=? WHERE id=?")
+      .run(now, recent.id);
+    this.db
+      .prepare("UPDATE rooms SET updated_at=? WHERE id=?")
+      .run(now, workspaceId);
+    this.announce(workspaceId, "file.edited", recent.id as string);
+  }
+  private flushEdits(room: Room) {
+    const docs = room.doc.getMap<Y.Map<unknown>>("documents");
+    for (const { fileId, actor } of room.edits.values()) {
+      const name = docs.get(fileId)?.get("filename");
+      if (typeof name === "string") this.recordEdit(room.workspaceId, name, actor);
+    }
+    room.edits.clear();
+  }
+  noteEdit(room: Room, fileId: string, actor?: Actor) {
+    const who = actor?.kind === "user" ? actor.id : (actor?.kind ?? "");
+    room.edits.set(fileId + "|" + who, { fileId, actor });
+  }
+  presence(workspaceId: string, recipient: WebSocket): PresenceSummary {
+    const rank = { viewer: 0, editor: 1, owner: 2 };
+    const self = this.live.get(recipient);
+    const users = new Map<string, PresenceSummary["users"][number]>(),
+      guests: PresenceSummary["guests"] = [];
+    let anonymous = 0;
+    for (const [peer, live] of this.live) {
+      if (live.workspaceId !== workspaceId) continue;
+      if (live.userId) {
+        // Several tabs of one account count once, at their highest role.
+        const previous = users.get(live.userId);
+        if (!previous || rank[live.access] > rank[previous.role])
+          users.set(live.userId, {
+            name: live.name ?? "Account",
+            role: live.access,
+            you: live.userId === self?.userId,
+          });
+      } else if (live.access !== "viewer")
+        guests.push({ name: live.name || "Guest editor", you: peer === recipient });
+      else anonymous++;
+    }
+    return {
+      total: users.size + guests.length + anonymous,
+      users: [...users.values()].sort(
+        (a, b) => rank[b.role] - rank[a.role] || a.name.localeCompare(b.name),
+      ),
+      guests,
+      anonymous,
+    };
+  }
+  // Coalesces bursts (a class joining at once) into one message per Owner/Editor socket.
+  schedulePresence(workspaceId: string) {
+    if (!this.sendJson || this.presenceTimers.has(workspaceId)) return;
+    this.presenceTimers.set(
+      workspaceId,
+      setTimeout(() => {
+        this.presenceTimers.delete(workspaceId);
+        for (const [peer, live] of this.live)
+          if (live.workspaceId === workspaceId && this.canSeePresence(peer))
+            this.sendJson?.(peer, { presence: this.presence(workspaceId, peer) });
+      }, 250),
+    );
   }
   get(workspaceId: string, folderId: string | null = null) {
     const key = folderId ? workspaceId + ":" + folderId : workspaceId;
@@ -380,6 +563,7 @@ export class Rooms {
         );
       this.db.exec("COMMIT");
       room.dirty = false;
+      this.flushEdits(room);
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
@@ -414,6 +598,8 @@ export class Rooms {
     this.active.delete(room.id);
   }
   close() {
+    for (const timer of this.presenceTimers.values()) clearTimeout(timer);
+    this.presenceTimers.clear();
     for (const room of this.active.values()) {
       for (const peer of room.peers.keys())
         peer.close(1001, "Server restarting");
