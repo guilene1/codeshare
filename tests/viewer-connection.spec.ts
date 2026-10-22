@@ -29,7 +29,7 @@ test("a viewer alone in a quiet workspace stays connected past y-websocket's 30 
     await viewer.addInitScript(COUNT_SOCKETS);
     await viewer.goto(url);
     await expect(viewer.getByLabel("Workspace access")).toContainText("View Only");
-    await expect(viewer.locator(".status-bar")).toContainText("Live");
+    await expect(viewer.getByLabel("Connection status")).toContainText("Live");
     // Watch the whole window for the reconnect banner, not just a final snapshot.
     await viewer.evaluate(() => {
       const w = window as unknown as { __bannerSeen: boolean };
@@ -45,7 +45,7 @@ test("a viewer alone in a quiet workspace stays connected past y-websocket's 30 
       return { opens: w.__opens, closes: w.__closes, bannerSeen: w.__bannerSeen };
     });
     expect(counts).toEqual({ opens: 1, closes: 0, bannerSeen: false });
-    await expect(viewer.locator(".status-bar")).toContainText("Live");
+    await expect(viewer.getByLabel("Connection status")).toContainText("Live");
   } finally {
     await context.close();
   }

@@ -156,7 +156,7 @@ test("opening a single-line file sends no edit, for editors and anonymous viewer
     await page.waitForTimeout(2000);
     // The viewer stayed connected (a write would have been refused and disconnected it).
     await expect(viewer.locator(".connection-warning")).toHaveCount(0);
-    await expect(viewer.locator(".status-bar")).toContainText("Live");
+    await expect(viewer.getByLabel("Connection status")).toContainText("Live");
   } finally {
     await context.close();
   }

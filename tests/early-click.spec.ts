@@ -222,7 +222,9 @@ test("View Only: no view switch or language label; Explorer, tabs, highlighting 
     // Status bar: the language stays; editor-only details (cursor, indentation, encoding) go.
     const status = viewer.locator(".status-bar");
     await expect(status.locator(".status-language")).toHaveText("Terraform / HCL");
-    await expect(status).toContainText("View Only");
+    // Connection state and access live in the header for viewers, not in the status bar.
+    for (const duplicate of ["Live", "View Only"]) await expect(status).not.toContainText(duplicate);
+    await expect(status.getByRole("button", { name: "Keyboard shortcuts" })).toBeVisible();
     for (const detail of [/Ln \d+, Col \d+/, /Spaces:/, /UTF-8/]) await expect(status).not.toContainText(detail);
     // The viewer cannot change the file.
     await viewer.locator(".monaco-editor .view-lines").first().click();

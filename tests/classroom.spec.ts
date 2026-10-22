@@ -39,7 +39,7 @@ test("instructor broadcasts to read-only students without leaking the private li
     await expect(viewer.getByLabel("Workspace access")).toContainText(
       "View Only",
     );
-    await expect(viewer.locator(".status-bar")).toContainText("Live");
+    await expect(viewer.getByLabel("Connection status")).toContainText("Live");
     await expect(owner.locator(".presence-count")).toContainText("1");
     await expect(viewer.getByLabel("Programming language")).toHaveCount(0);
     await expect(owner.locator(".sidebar-people")).toContainText(

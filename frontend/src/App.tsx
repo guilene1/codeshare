@@ -1500,6 +1500,13 @@ function Workspace({
       </div>
     );
   const connected = status === "connected" && synced;
+  const connectionLabel = connected
+    ? isEditor
+      ? "Connected"
+      : "Live"
+    : status === "connected"
+      ? "Syncing"
+      : "Reconnecting";
   return (
     <div className="workspace">
       <header className="workspace-nav">
@@ -1521,13 +1528,6 @@ function Workspace({
           <span className="room-title-label">WORKSPACE</span>
           <strong>{room.name}</strong>
         </div>
-        <span
-          className={"access-badge " + (isEditor ? "editing" : "view-only")}
-          aria-label="Workspace access"
-        >
-          {isEditor ? <Pencil size={13} /> : <Eye size={14} />}
-          <span>{isEditor ? "Editing" : "View Only"}</span>
-        </span>
         {/* Editors choose the file's language; viewers just read the highlighted file. */}
         {isEditor && (
           <div className="toolbar-language">
@@ -1539,6 +1539,20 @@ function Workspace({
           </div>
         )}
         <div className="nav-right">
+          <span
+            className={"connection-state" + (connected ? "" : " offline")}
+            aria-label="Connection status"
+          >
+            <span className="live-dot" />
+            <span className="connection-label">{connectionLabel}</span>
+          </span>
+          <span
+            className={"access-badge " + (isEditor ? "editing" : "view-only")}
+            aria-label="Workspace access"
+          >
+            {isEditor ? <Pencil size={13} /> : <Eye size={14} />}
+            <span>{isEditor ? "Editing" : "View Only"}</span>
+          </span>
           {isEditor && (
             <span
               className="presence-count"
@@ -2167,21 +2181,16 @@ function Workspace({
             <LogoMark size={15} />
             {BRAND}
           </span>
-          <span>
-            {connected ? <Wifi size={13} /> : <WifiOff size={13} />}{" "}
-            {connected
-              ? isEditor
-                ? "Connected"
-                : "Live"
-              : status === "connected"
-                ? "Syncing"
-                : "Reconnecting"}
-          </span>
+          {/* Viewers see their connection state and access in the header instead. */}
+          {isEditor && (
+            <span>
+              {connected ? <Wifi size={13} /> : <WifiOff size={13} />}{" "}
+              {connectionLabel}
+            </span>
+          )}
         </div>
         <div>
-          <span className="status-access">
-            {isEditor ? "Editing" : "View Only"}
-          </span>
+          {isEditor && <span className="status-access">Editing</span>}
           {!isEditor && people.some((person) => person.role === "editor") && (
             <span className="status-hide">Instructor is editing</span>
           )}

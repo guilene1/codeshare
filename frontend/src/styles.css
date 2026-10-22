@@ -216,6 +216,9 @@
   .access-badge span {
     display: none;
   }
+  .connection-label {
+    display: none;
+  }
   .access-badge {
     padding: 5px;
   }
@@ -927,9 +930,27 @@ option {
   font-size: 12px;
   width: 165px;
 }
+/* The connection state, access badge, tools, settings and theme sit together at the far right.
+   With the editors' language selector present, that selector takes the free space instead. */
 .workspace-nav .nav-right {
-  margin-left: 0;
+  margin-left: auto;
   gap: 9px;
+}
+.workspace-nav .toolbar-language + .nav-right {
+  margin-left: 0;
+}
+.connection-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-right: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.connection-state.offline .live-dot {
+  background: #f0b429;
 }
 .presence-count {
   display: flex;
