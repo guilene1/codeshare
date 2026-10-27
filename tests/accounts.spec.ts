@@ -25,8 +25,8 @@ function makeUnowned(id: string) {
 }
 async function coEditorLink(page: Page) {
   await page.getByRole("button", { name: "Share", exact: true }).click();
-  await page.getByRole("button", { name: "Create co-editor link", exact: true }).click();
-  const link = await page.getByLabel("Private editor link", { exact: true }).inputValue();
+  await page.getByRole("button", { name: "Create Edit Link", exact: true }).click();
+  const link = await page.getByLabel("Edit link", { exact: true }).inputValue();
   await page.getByRole("button", { name: "Close dialog" }).click();
   return link;
 }

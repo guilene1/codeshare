@@ -27,10 +27,10 @@ test("two isolated browsers collaborate with real Monaco, cursor presence, files
     // A co-teacher without an account joins through a private co-editor link.
     await first.getByRole("button", { name: "Share", exact: true }).click();
     await first
-      .getByRole("button", { name: "Create co-editor link", exact: true })
+      .getByRole("button", { name: "Create Edit Link", exact: true })
       .click();
     const editorLink = await first
-      .getByLabel("Private editor link", { exact: true })
+      .getByLabel("Edit link", { exact: true })
       .inputValue();
     expect(editorLink).toMatch(/\/w\/[\w-]{16}\/edit\/[\w-]{43}$/);
     await first.getByRole("button", { name: "Close dialog" }).click();

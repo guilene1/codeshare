@@ -113,6 +113,25 @@
   padding-top: 22px;
   margin-top: 22px;
 }
+.private-access .fine-print {
+  margin-top: 10px;
+}
+.share-confirm {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid #cf435866;
+  border-radius: 8px;
+  background: #cf435812;
+}
+.share-confirm p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text);
+}
+.share-confirm .dialog-actions {
+  margin-top: 12px;
+}
 .private-access h3 {
   color: var(--accent);
 }
@@ -1065,7 +1084,41 @@ option {
   border-top: 1px solid var(--border);
   padding-top: 12px;
   overflow: auto;
-  max-height: 35%;
+  flex: 0 1 var(--people-height, auto);
+  min-height: var(--people-min, 0px);
+  max-height: var(--people-cap, 35%);
+}
+/* Divider between the Explorer and Connected: an easy-to-grab strip over Connected's border,
+   highlighted like the Explorer's width resizer. */
+.sidebar-splitter {
+  position: relative;
+  z-index: 5;
+  flex-shrink: 0;
+  height: 9px;
+  margin: -4px 0 -5px;
+  cursor: row-resize;
+  touch-action: none;
+  outline: none;
+}
+.sidebar-splitter::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 3px;
+  height: 3px;
+  background: transparent;
+  transition: background 0.15s 0.1s;
+}
+.sidebar-splitter:hover::after,
+.sidebar-splitter:focus-visible::after,
+.resizing-sidebar-split .sidebar-splitter::after {
+  background: var(--accent);
+}
+.resizing-sidebar-split,
+.resizing-sidebar-split * {
+  cursor: row-resize !important;
+  user-select: none !important;
 }
 .anonymous-viewers {
   padding: 4px 18px;
@@ -2177,7 +2230,7 @@ option {
   }
   .sidebar-people {
     margin-top: auto;
-    max-height: 45%;
+    max-height: var(--people-cap, 45%);
   }
   .editor-breadcrumb > span:first-child,
   .editor-breadcrumb > svg:first-of-type {
@@ -2294,6 +2347,15 @@ option {
   /* The phone Explorer is an overlay with a fixed width, so it has no splitter. */
   .explorer-resizer {
     display: none;
+  }
+  /* Nor a vertical split: phones keep the default Explorer/Connected layout. */
+  .sidebar-splitter {
+    display: none;
+  }
+  .sidebar-people {
+    flex: 0 1 auto;
+    min-height: 0;
+    max-height: 45%;
   }
   .sidebar-tip {
     display: block;

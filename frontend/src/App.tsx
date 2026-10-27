@@ -73,6 +73,7 @@ import { fence, imageMarkdown, insertBlock, isDocumentLanguage } from "./markdow
 import { BRAND, Logo, LogoMark, TAGLINE } from "./brand";
 import CourseExplorer from "./components/CourseExplorer";
 import ExplorerResizer, { clampExplorerWidth } from "./components/ExplorerResizer";
+import SidebarSplitter, { PEOPLE_MIN } from "./components/SidebarSplitter";
 import WorkspaceActivity from "./components/WorkspaceActivity";
 import { ClassroomAwareness } from "./components/ClassroomAwareness";
 import {
@@ -677,6 +678,15 @@ function Workspace({
       | null
     >(null),
     [sidebar, setSidebar] = useState(() => window.innerWidth > 560),
+    // null keeps the default Explorer/Connected split; a number is Connected's dragged height.
+    [peopleHeight, setPeopleHeight] = useState<number | null>(() => {
+      const saved = readLocal<unknown>("devshare.peopleHeight", null);
+      return typeof saved === "number" && Number.isFinite(saved)
+        ? Math.max(PEOPLE_MIN, Math.round(saved)) // CSS caps it to the sidebar
+        : null;
+    }),
+    // An Edit Link created during this page session (memory only; see AccessShare).
+    [freshEditLink, setFreshEditLink] = useState(""),
     // null keeps the responsive default width; a number is the user's dragged width.
     [sidebarWidth, setSidebarWidth] = useState<number | null>(() => {
       const saved = readLocal<unknown>("devshare.sidebarWidth", null);
@@ -707,6 +717,8 @@ function Workspace({
   const isOwner = room?.access === "owner";
   const isEditor = isOwner || room?.access === "editor";
   const anonymousViewers = plural(presence?.anonymous ?? 0, "anonymous viewer");
+  // Never carry a page-session Edit Link over to another workspace.
+  useEffect(() => setFreshEditLink(""), [id]);
   // Editors get the views bar (activity, lesson name, view switch); viewers only need it to
   // reach unmigrated legacy snippets.
   const showViews = isEditor || (!!blocks.length && !migrated);
@@ -1640,7 +1652,18 @@ function Workspace({
         }
       >
         {sidebar && (
-          <aside className="sidebar">
+          <aside
+            className="sidebar"
+            style={
+              peopleHeight === null
+                ? undefined
+                : ({
+                    "--people-height": peopleHeight + "px",
+                    "--people-cap": "none",
+                    "--people-min": PEOPLE_MIN + "px",
+                  } as CSSProperties)
+            }
+          >
             <div className="sidebar-heading">
               EXPLORER
               {isEditor && (
@@ -1666,6 +1689,16 @@ function Workspace({
                 roomApi("/rooms/" + id + path, method, body)
               }
             />
+            {/* Only Owners and Editors have the Connected section, so only they get the split. */}
+            {isEditor && (
+              <SidebarSplitter
+                height={peopleHeight}
+                onChange={(height) => {
+                  setPeopleHeight(height);
+                  storeLocal("devshare.peopleHeight", height);
+                }}
+              />
+            )}
             {isEditor && (
               <div className="sidebar-people">
                 <div className="sidebar-heading">
@@ -2298,6 +2331,8 @@ function Workspace({
           editorToken={room.access === "editor" ? credential : undefined}
           owner={isOwner}
           hasEditorLink={room.hasEditorLink}
+          freshToken={freshEditLink}
+          onFreshToken={setFreshEditLink}
           copy={copy}
           onLinkChange={(exists) =>
             setRoom((previous) =>

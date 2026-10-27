@@ -20,17 +20,17 @@ test("instructor broadcasts to read-only students without leaking the private li
     // The owner edits through the account, so the Student Link is the plain URL.
     expect(studentUrl).toBe(ownerUrl);
     await expect(
-      owner.getByLabel("Private editor link", { exact: true }),
+      owner.getByLabel("Edit link", { exact: true }),
     ).toHaveCount(0);
     await owner
-      .getByRole("button", { name: "Create co-editor link", exact: true })
+      .getByRole("button", { name: "Create Edit Link", exact: true })
       .click();
     const token = (
-      await owner.getByLabel("Private editor link", { exact: true }).inputValue()
+      await owner.getByLabel("Edit link", { exact: true }).inputValue()
     ).split("/edit/")[1];
     expect(token).toMatch(/^[\w-]{43}$/);
     await expect(
-      owner.getByRole("button", { name: "Copy Editor Link", exact: true }),
+      owner.getByRole("button", { name: "Copy Edit Link", exact: true }),
     ).toBeVisible();
     await owner.getByRole("button", { name: "Close dialog" }).click();
     await viewer.goto(studentUrl);
@@ -102,7 +102,7 @@ test("instructor broadcasts to read-only students without leaking the private li
     await expect(viewer.locator(".find-widget")).toBeVisible();
     await viewer.keyboard.press("Escape");
     await expect(
-      viewer.getByLabel("Private editor link", { exact: true }),
+      viewer.getByLabel("Edit link", { exact: true }),
     ).toHaveCount(0);
     expect(await viewer.content()).not.toContain(token);
     const roomId = studentUrl.split("/").pop()!;

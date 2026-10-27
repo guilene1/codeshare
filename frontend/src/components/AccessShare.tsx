@@ -156,6 +156,8 @@ export default function AccessShare({
   owner,
   hasEditorLink,
   folderId,
+  freshToken,
+  onFreshToken,
   copy,
   onLinkChange,
   onClose,
@@ -166,18 +168,22 @@ export default function AccessShare({
   owner: boolean;
   hasEditorLink?: boolean;
   folderId?: string | null;
+  // A link created during this page session. Only its hash is stored on the server, so it
+  // lives in memory alone (never browser storage) and is gone after a refresh.
+  freshToken: string;
+  onFreshToken: (token: string) => void;
   copy: (value: string, label: string) => void;
   onLinkChange: (exists: boolean) => void;
   onClose: () => void;
 }) {
   const [show, setShow] = useState(false);
-  const [fresh, setFresh] = useState("");
+  const [confirm, setConfirm] = useState<"replace" | "revoke" | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const base = location.origin + "/w/" + id;
   const lesson = folderId ? "?folder=" + folderId : "";
   const studentLink = base + lesson;
-  const token = fresh || (owner ? "" : editorToken);
+  const token = owner ? freshToken : editorToken;
   const editorLink = token ? base + "/edit/" + token + lesson : "";
   async function manage(method: "POST" | "DELETE") {
     setBusy(true);
@@ -189,14 +195,15 @@ export default function AccessShare({
           "POST",
           {},
         );
-        setFresh(result.token);
-        setShow(true);
+        onFreshToken(result.token);
         onLinkChange(true);
       } else {
         await api(`/rooms/${id}/editor-link`, "DELETE");
-        setFresh("");
+        onFreshToken("");
         onLinkChange(false);
       }
+      setShow(false);
+      setConfirm(null);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -250,23 +257,22 @@ export default function AccessShare({
           </button>
         </div>
       </section>
-      {owner && <PeopleAccess id={id} />}
       {(owner || editorToken) && (
-        <section className="access-share-section private-access">
+        <section className="access-share-section private-access" aria-label="Editors">
           <h3>
             <LockKeyhole size={16} />
-            Co-editor access
+            Editors · Can edit
           </h3>
           <p>
-            Anyone with the private editor link can edit code and manage files.
+            Anyone with the Edit Link can edit files and manage lesson folders.
             {owner
-              ? " Only you can rename, delete or share ownership of this workspace."
+              ? " Only you can rename, delete or share this workspace."
               : " Keep it private."}
           </p>
           {editorLink ? (
             <>
               <label className="field">
-                Private editor link
+                Edit link
                 <div className="copy-field">
                   <input
                     type={show ? "text" : "password"}
@@ -277,61 +283,86 @@ export default function AccessShare({
                   />
                   <button
                     className="icon-button"
-                    aria-label={show ? "Hide editor link" : "Show editor link"}
+                    aria-label={show ? "Hide edit link" : "Show edit link"}
                     onClick={() => setShow(!show)}
                   >
                     {show ? <EyeOff size={16} /> : <Eye size={16} />}
                   </button>
+                  <button
+                    className="icon-button"
+                    aria-label="Copy edit link"
+                    onClick={() => copy(editorLink, "Edit link")}
+                  >
+                    <Copy size={17} />
+                  </button>
                 </div>
               </label>
-              {fresh && (
+              {owner && (
                 <p className="fine-print">
-                  Copy it now: for security, {BRAND} shows a new link only
-                  once.
+                  Available until you refresh or leave this page. For security,{" "}
+                  {BRAND} can't show this link again later.
                 </p>
               )}
               <button
-                className="button primary full"
-                onClick={() => copy(editorLink, "Editor link")}
+                className="button secondary full"
+                onClick={() => copy(editorLink, "Edit link")}
               >
-                <Copy size={16} />
-                Copy Editor Link
+                <Link size={16} />
+                Copy Edit Link
               </button>
             </>
           ) : (
             owner && (
               <p className="fine-print">
                 {hasEditorLink
-                  ? "A co-editor link is active. It was shown once when created; replace it to get a new one."
-                  : "No co-editor link exists. You edit through your account."}
+                  ? `An Edit Link is active, but it can't be displayed again: for security, ${BRAND} keeps only a fingerprint of it and showed it once when it was created. Replace it to get a new link; the current link will stop working.`
+                  : "No Edit Link exists yet. Create one to let a co-editor edit without an account."}
               </p>
             )
           )}
-          {owner && (
-            <div className="dialog-actions">
-              {hasEditorLink && (
+          {owner &&
+            (confirm ? (
+              <div className="share-confirm" role="group" aria-label="Confirm Edit Link change">
+                <p>
+                  {confirm === "replace"
+                    ? "Replace the Edit Link? Anyone using the current link loses editing access right away."
+                    : "Revoke the Edit Link? Anyone using it loses editing access right away."}
+                </p>
+                <div className="dialog-actions">
+                  <button className="button secondary" disabled={busy} onClick={() => setConfirm(null)}>
+                    Cancel
+                  </button>
+                  <button
+                    className="button danger"
+                    disabled={busy}
+                    onClick={() => void manage(confirm === "replace" ? "POST" : "DELETE")}
+                  >
+                    {busy && <Loader2 size={15} className="spin" />}
+                    {confirm === "replace" ? "Yes, replace link" : "Yes, revoke link"}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="dialog-actions">
+                {hasEditorLink && (
+                  <button
+                    className="button secondary"
+                    disabled={busy}
+                    onClick={() => setConfirm("revoke")}
+                  >
+                    <ShieldOff size={15} /> Revoke link
+                  </button>
+                )}
                 <button
                   className="button secondary"
                   disabled={busy}
-                  onClick={() => void manage("DELETE")}
+                  onClick={() => (hasEditorLink ? setConfirm("replace") : void manage("POST"))}
                 >
-                  <ShieldOff size={15} /> Revoke link
+                  {busy ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />}
+                  {hasEditorLink ? "Replace link" : "Create Edit Link"}
                 </button>
-              )}
-              <button
-                className="button secondary"
-                disabled={busy}
-                onClick={() => void manage("POST")}
-              >
-                {busy ? (
-                  <Loader2 size={15} className="spin" />
-                ) : (
-                  <RefreshCw size={15} />
-                )}
-                {hasEditorLink ? "Replace link" : "Create co-editor link"}
-              </button>
-            </div>
-          )}
+              </div>
+            ))}
           {error && (
             <p className="error" role="alert">
               {error}
@@ -339,6 +370,7 @@ export default function AccessShare({
           )}
         </section>
       )}
+      {owner && <PeopleAccess id={id} />}
     </Modal>
   );
 }
