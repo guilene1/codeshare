@@ -24,14 +24,25 @@ type Share = {
   role: ShareRole;
 };
 
-// Owners add existing registered users so the workspace appears in their Shared with Me.
-// Students never need this: the viewer link above works without an account.
-function PeopleAccess({ id }: { id: string }) {
+// Owners and editors add existing registered users so the workspace appears in their
+// Shared with Me. Students never need this: the viewer link above works without an account.
+function PeopleAccess({
+  id,
+  selfId,
+  onAccessChange,
+}: {
+  id: string;
+  selfId?: string;
+  // Called after this user changed their own share, so the workspace re-reads its rights.
+  onAccessChange: () => void;
+}) {
   const [shares, setShares] = useState<Share[] | null>(null);
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<ShareRole>("viewer");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // An editor downgrading or removing themselves confirms first (role null = remove).
+  const [selfChange, setSelfChange] = useState<{ role: ShareRole | null } | null>(null);
   useEffect(() => {
     api<{ shares: Share[] }>(`/rooms/${id}/shares`)
       .then((result) => setShares(result.shares))
@@ -51,6 +62,14 @@ function PeopleAccess({ id }: { id: string }) {
     } finally {
       setBusy(false);
     }
+  }
+  async function update(userId: string, next: ShareRole | null) {
+    const done = await change(() =>
+      next
+        ? api(`/rooms/${id}/shares/${userId}`, "PATCH", { role: next })
+        : api(`/rooms/${id}/shares/${userId}`, "DELETE"),
+    );
+    if (done && userId === selfId) onAccessChange();
   }
   async function add(event: FormEvent) {
     event.preventDefault();
@@ -108,43 +127,71 @@ function PeopleAccess({ id }: { id: string }) {
         <p className="fine-print">Not shared with any accounts yet.</p>
       ) : (
         <ul className="people-list">
-          {shares.map((share) => (
-            <li key={share.userId}>
-              <span>
-                <strong>{share.displayName}</strong>
-                <small>{share.email}</small>
-              </span>
-              <select
-                aria-label={`Permission for ${share.displayName}`}
-                value={share.role}
-                disabled={busy}
-                onChange={(e) =>
-                  void change(() =>
-                    api(`/rooms/${id}/shares/${share.userId}`, "PATCH", {
-                      role: e.target.value,
-                    }),
-                  )
-                }
-              >
-                <option value="viewer">Viewer</option>
-                <option value="editor">Editor</option>
-              </select>
-              <button
-                className="icon-button"
-                aria-label={`Remove ${share.displayName}`}
-                title="Remove access"
-                disabled={busy}
-                onClick={() =>
-                  void change(() =>
-                    api(`/rooms/${id}/shares/${share.userId}`, "DELETE"),
-                  )
-                }
-              >
-                <X size={15} />
-              </button>
-            </li>
-          ))}
+          {shares.map((share) => {
+            const self = share.userId === selfId;
+            return (
+              <li key={share.userId}>
+                <span>
+                  <strong>
+                    {share.displayName}
+                    {self && " (you)"}
+                  </strong>
+                  <small>{share.email}</small>
+                </span>
+                <select
+                  aria-label={`Permission for ${share.displayName}`}
+                  value={share.role}
+                  disabled={busy}
+                  onChange={(e) => {
+                    const next = e.target.value as ShareRole;
+                    if (self && next !== "editor") setSelfChange({ role: next });
+                    else void update(share.userId, next);
+                  }}
+                >
+                  <option value="viewer">Viewer</option>
+                  <option value="editor">Editor</option>
+                </select>
+                <button
+                  className="icon-button"
+                  aria-label={`Remove ${share.displayName}`}
+                  title="Remove access"
+                  disabled={busy}
+                  onClick={() =>
+                    self ? setSelfChange({ role: null }) : void update(share.userId, null)
+                  }
+                >
+                  <X size={15} />
+                </button>
+              </li>
+            );
+          })}
         </ul>
+      )}
+      {selfChange && selfId && (
+        <div className="share-confirm" role="group" aria-label="Confirm your access change">
+          <p>
+            {selfChange.role
+              ? "Change your own access to Viewer? You lose editing and sharing right away."
+              : "Remove your own access? You lose editing and sharing right away, and the workspace leaves your Shared with Me list."}
+          </p>
+          <div className="dialog-actions">
+            <button className="button secondary" disabled={busy} onClick={() => setSelfChange(null)}>
+              Cancel
+            </button>
+            <button
+              className="button danger"
+              disabled={busy}
+              onClick={() => {
+                const next = selfChange.role;
+                setSelfChange(null);
+                void update(selfId, next);
+              }}
+            >
+              {busy && <Loader2 size={15} className="spin" />}
+              {selfChange.role ? "Yes, change my access" : "Yes, remove my access"}
+            </button>
+          </div>
+        </div>
       )}
     </section>
   );
@@ -154,18 +201,24 @@ export default function AccessShare({
   name,
   editorToken,
   owner,
+  canShare,
+  selfId,
   hasEditorLink,
   folderId,
   freshToken,
   onFreshToken,
   copy,
   onLinkChange,
+  onAccessChange,
   onClose,
 }: {
   id: string;
   name: string;
   editorToken?: string;
   owner: boolean;
+  // The owner and signed-in editors manage the Edit Link and account sharing.
+  canShare: boolean;
+  selfId?: string;
   hasEditorLink?: boolean;
   folderId?: string | null;
   // A link created during this page session. Only its hash is stored on the server, so it
@@ -174,6 +227,7 @@ export default function AccessShare({
   onFreshToken: (token: string) => void;
   copy: (value: string, label: string) => void;
   onLinkChange: (exists: boolean) => void;
+  onAccessChange: () => void;
   onClose: () => void;
 }) {
   const [show, setShow] = useState(false);
@@ -183,7 +237,8 @@ export default function AccessShare({
   const base = location.origin + "/w/" + id;
   const lesson = folderId ? "?folder=" + folderId : "";
   const studentLink = base + lesson;
-  const token = owner ? freshToken : editorToken;
+  // Managers see only a link they created on this page; the stored hash can't be shown.
+  const token = canShare ? freshToken : editorToken;
   const editorLink = token ? base + "/edit/" + token + lesson : "";
   async function manage(method: "POST" | "DELETE") {
     setBusy(true);
@@ -257,7 +312,7 @@ export default function AccessShare({
           </button>
         </div>
       </section>
-      {(owner || editorToken) && (
+      {(canShare || editorToken) && (
         <section className="access-share-section private-access" aria-label="Editors">
           <h3>
             <LockKeyhole size={16} />
@@ -266,8 +321,10 @@ export default function AccessShare({
           <p>
             Anyone with the Edit Link can edit files and manage lesson folders.
             {owner
-              ? " Only you can rename, delete or share this workspace."
-              : " Keep it private."}
+              ? " Only you can rename or delete this workspace."
+              : canShare
+                ? " Only the owner can rename or delete this workspace."
+                : " Keep it private."}
           </p>
           {editorLink ? (
             <>
@@ -297,7 +354,7 @@ export default function AccessShare({
                   </button>
                 </div>
               </label>
-              {owner && (
+              {canShare && (
                 <p className="fine-print">
                   Available until you refresh or leave this page. For security,{" "}
                   {BRAND} can't show this link again later.
@@ -312,7 +369,7 @@ export default function AccessShare({
               </button>
             </>
           ) : (
-            owner && (
+            canShare && (
               <p className="fine-print">
                 {hasEditorLink
                   ? `An Edit Link is active, but it can't be displayed again: for security, ${BRAND} keeps only a fingerprint of it and showed it once when it was created. Replace it to get a new link; the current link will stop working.`
@@ -320,7 +377,7 @@ export default function AccessShare({
               </p>
             )
           )}
-          {owner &&
+          {canShare &&
             (confirm ? (
               <div className="share-confirm" role="group" aria-label="Confirm Edit Link change">
                 <p>
@@ -370,7 +427,7 @@ export default function AccessShare({
           )}
         </section>
       )}
-      {owner && <PeopleAccess id={id} />}
+      {canShare && <PeopleAccess id={id} selfId={selfId} onAccessChange={onAccessChange} />}
     </Modal>
   );
 }

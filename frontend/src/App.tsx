@@ -104,6 +104,7 @@ type RoomInfo = {
   access?: "owner" | "editor" | "viewer";
   owned?: boolean;
   claimable?: boolean;
+  canShare?: boolean;
   hasEditorLink?: boolean;
 };
 type Person = {
@@ -1020,6 +1021,11 @@ function Workspace({
       body,
       credential,
     );
+  // Re-reads this user's rights after a sharing change, so lost controls disappear at once.
+  const reloadRoom = () =>
+    roomApi<RoomInfo>("/rooms/" + id)
+      .then(setRoom)
+      .catch(() => {});
   function openLesson(next: string | null, file?: string) {
     setError("");
     if (next === folder) {
@@ -1201,6 +1207,8 @@ function Workspace({
             "The server rejected this change. Refresh to reconnect.",
         );
         p.shouldConnect = false;
+        // A changed or removed share closes the socket this way: drop controls it no longer allows.
+        reloadRoom();
         api<CourseTree>("/rooms/" + id + "/tree", "GET", undefined, credential)
           .then((value) => {
             setTree(value);
@@ -2330,6 +2338,8 @@ function Workspace({
           name={room.name}
           editorToken={room.access === "editor" ? credential : undefined}
           owner={isOwner}
+          canShare={!!room.canShare}
+          selfId={user?.id}
           hasEditorLink={room.hasEditorLink}
           freshToken={freshEditLink}
           onFreshToken={setFreshEditLink}
@@ -2339,6 +2349,7 @@ function Workspace({
               previous ? { ...previous, hasEditorLink: exists } : previous,
             )
           }
+          onAccessChange={() => void reloadRoom()}
           onClose={() => setDialog(null)}
         />
       )}

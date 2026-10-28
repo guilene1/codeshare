@@ -1,5 +1,5 @@
-// Share popup "Editors · Can edit" (owner-only Edit Link management, masked, page-session only,
-// confirmed replace/revoke) and the Explorer/Connected vertical splitter.
+// Share popup "Editors · Can edit" (Edit Link management for the owner and account editors,
+// masked, page-session only, confirmed replace/revoke) and the Explorer/Connected vertical splitter.
 import { test, expect, type Page, type Browser } from "@playwright/test";
 import { createWorkspace, signUp, uniqueEmail } from "./helpers";
 
@@ -104,34 +104,99 @@ async function pages(browser: Browser, n: number) {
   return { contexts, pages: await Promise.all(contexts.map((c) => c.newPage())) };
 }
 
-test("non-owners cannot see or manage Edit Links; the Student Link stays view-only", async ({ browser }) => {
-  test.setTimeout(150_000);
-  const { contexts, pages: [owner, ed, vera, guest, student] } = await pages(browser, 5);
+test("account editors manage the Edit Link and sharing like the owner; link guests, viewers and students don't", async ({ browser }) => {
+  test.setTimeout(180_000);
+  const { contexts, pages: [owner, ed, eve, vera, guest, student] } = await pages(browser, 6);
   try {
+    await contexts[1].grantPermissions(["clipboard-read", "clipboard-write"]);
     const edEmail = uniqueEmail("ed"),
+      eveEmail = uniqueEmail("eve"),
       veraEmail = uniqueEmail("vera");
     await signUp(ed, "Ed Editor", edEmail);
+    await signUp(eve, "Eve Editor", eveEmail);
     await signUp(vera, "Vera Viewer", veraEmail);
     await signUp(owner, "Link Owner");
     const url = await createWorkspace(owner, "Edit link permissions");
+    const ownerId = await owner.evaluate(async () => (await (await fetch("/api/auth/me")).json()).user.id);
     for (const s of [{ email: edEmail, role: "editor" }, { email: veraEmail, role: "viewer" }])
       expect((await apiCall(owner, "/shares", "POST", s)).status).toBe(201);
     await share(owner);
     await editors(owner).getByRole("button", { name: "Create Edit Link", exact: true }).click();
-    const link = await editors(owner).getByLabel("Edit link", { exact: true }).inputValue();
+    const ownerLink = await editors(owner).getByLabel("Edit link", { exact: true }).inputValue();
 
-    // Account editor: edits, but has no Editors section and cannot create or revoke links.
+    // Account editor: the full Share popup. The owner's link exists but is never shown.
     await ed.goto(url);
     await expect(ed.getByLabel("Workspace access")).toContainText("Editing");
     await share(ed);
-    await expect(editors(ed)).toHaveCount(0);
-    await expect(ed.getByRole("button", { name: /Create Edit Link|Replace link|Revoke link/ })).toHaveCount(0);
+    const headings = await ed.getByRole("dialog").locator("h3").allTextContents();
+    expect(headings.map((h) => h.trim())).toEqual(["Students · View only", "Editors · Can edit", "People with access"]);
+    await expect(editors(ed)).toContainText("can't be displayed again");
+    await expect(editors(ed).getByLabel("Edit link", { exact: true })).toHaveCount(0);
+    expect(await ed.content()).not.toContain(tokenOf(ownerLink));
+    // Replace (confirmed), copy, revoke and create again.
+    await editors(ed).getByRole("button", { name: "Replace link", exact: true }).click();
+    await editors(ed).getByRole("button", { name: "Yes, replace link" }).click();
+    const replaced = await editors(ed).getByLabel("Edit link", { exact: true }).inputValue();
+    expect(await linkAccess(ed, tokenOf(ownerLink))).toBe(403);
+    expect(await linkAccess(ed, tokenOf(replaced))).toBe("editor");
+    await editors(ed).getByRole("button", { name: "Copy Edit Link", exact: true }).click();
+    expect(await ed.evaluate(() => navigator.clipboard.readText())).toBe(replaced);
+    await editors(ed).getByRole("button", { name: "Revoke link", exact: true }).click();
+    await editors(ed).getByRole("button", { name: "Yes, revoke link" }).click();
+    await expect(editors(ed)).toContainText("No Edit Link exists yet");
+    expect(await linkAccess(ed, tokenOf(replaced))).toBe(403);
+    await editors(ed).getByRole("button", { name: "Create Edit Link", exact: true }).click();
+    const link = await editors(ed).getByLabel("Edit link", { exact: true }).inputValue();
+    expect(await linkAccess(ed, tokenOf(link))).toBe("editor");
+
+    // The editor invites another editor, who also gets the full popup.
+    const people = ed.getByRole("region", { name: "People with access" });
+    await expect(people).toContainText("Ed Editor (you)");
+    await people.getByLabel("Email address").fill(eveEmail);
+    await people.getByLabel("Permission", { exact: true }).selectOption("editor");
+    await people.getByRole("button", { name: "Share", exact: true }).click();
+    await expect(people.getByLabel("Permission for Eve Editor")).toHaveValue("editor");
+    await eve.goto(url);
+    await share(eve);
+    await expect(eve.getByRole("region", { name: "People with access" })).toBeVisible();
+    // Downgrading Eve removes her sharing controls right away, without a refresh.
+    await people.getByLabel("Permission for Eve Editor").selectOption("viewer");
+    await expect(eve.getByLabel("Workspace access")).toContainText("View Only");
+    await expect(eve.getByRole("dialog")).toHaveCount(0);
+    await expect(eve.getByRole("button", { name: "Share", exact: true })).toHaveCount(0);
+    // Removing someone else needs no confirmation.
+    await people.getByRole("button", { name: "Remove Vera Viewer" }).click();
+    await expect(people).not.toContainText("Vera Viewer");
+    // The owner has no row here and can't be changed through the API either.
+    await expect(people).not.toContainText("Link Owner");
+    expect((await apiCall(ed, `/shares/${ownerId}`, "PATCH", { role: "viewer" })).status).toBe(403);
+    expect((await apiCall(ed, `/shares/${ownerId}`, "DELETE")).status).toBe(403);
+    // Rename and delete stay with the owner.
+    expect((await apiCall(ed, "", "PATCH", { name: "Taken" })).status).toBe(403);
+
+    // Removing yourself asks first, then drops the sharing controls at once.
+    await people.getByRole("button", { name: "Remove Ed Editor" }).click();
+    await expect(people.getByRole("group", { name: "Confirm your access change" })).toContainText("Remove your own access?");
+    await people.getByRole("button", { name: "Cancel", exact: true }).click();
+    expect((await apiCall(ed, "/shares")).status).toBe(200);
+    await people.getByRole("button", { name: "Remove Ed Editor" }).click();
+    await people.getByRole("button", { name: "Yes, remove my access" }).click();
+    await expect(ed.getByLabel("Workspace access")).toContainText("View Only");
+    await expect(ed.getByRole("dialog")).toHaveCount(0);
+    await expect(ed.getByRole("button", { name: "Share", exact: true })).toHaveCount(0);
+    expect((await apiCall(ed, "/shares")).status).toBe(403);
     expect((await apiCall(ed, "/editor-link", "POST", {})).status).toBe(403);
-    expect((await apiCall(ed, "/editor-link", "DELETE")).status).toBe(403);
+    // The Edit Link Ed created keeps working until someone replaces or revokes it.
+    expect(await linkAccess(ed, tokenOf(link))).toBe("editor");
+    expect((await apiCall(owner, "/shares")).body.shares.map((s: { displayName: string; role: string }) => [s.displayName, s.role])).toEqual([
+      ["Eve Editor", "viewer"],
+    ]);
+
     // Registered viewer: no Share at all.
     await vera.goto(url);
     await expect(vera.getByLabel("Workspace access")).toContainText("View Only");
     await expect(vera.getByRole("button", { name: "Share", exact: true })).toHaveCount(0);
+    expect((await apiCall(vera, "/shares")).status).toBe(403);
     // Edit Link holder: edits, sees only their own link (masked), with no management.
     await guest.goto(link);
     await guest.getByLabel("Your name").fill("Guest");
@@ -140,6 +205,7 @@ test("non-owners cannot see or manage Edit Links; the Student Link stays view-on
     await share(guest);
     await expect(editors(guest).getByLabel("Edit link", { exact: true })).toHaveAttribute("type", "password");
     await expect(guest.getByRole("button", { name: /Create Edit Link|Replace link|Revoke link/ })).toHaveCount(0);
+    await expect(guest.getByRole("region", { name: "People with access" })).toHaveCount(0);
     // Student Link: strictly view-only, with no trace of the Edit Link.
     await student.goto(url);
     await expect(student.getByLabel("Workspace access")).toContainText("View Only");

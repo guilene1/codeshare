@@ -142,7 +142,7 @@ test("sharing: Viewer and Editor accounts, Shared with Me, view-only controls, a
     await expectViewOnlyControls(student);
     await student.screenshot({ path: "test-results/sharing-student-view-only.png" });
 
-    // Editor share: edits content and keeps Copy, but cannot manage the workspace.
+    // Editor share: edits content, keeps Copy and manages sharing, but cannot rename the workspace.
     await ed.reload();
     await ed
       .getByRole("region", { name: "Shared with Me" })
@@ -154,7 +154,7 @@ test("sharing: Viewer and Editor accounts, Shared with Me, view-only controls, a
     await expect(ed.locator(".inline-block").getByRole("button", { name: "Copy code" })).toBeVisible();
     await expect(ed.getByRole("button", { name: "Download file", exact: true })).toBeVisible();
     await ed.getByRole("button", { name: "Share", exact: true }).click();
-    await expect(ed.getByRole("region", { name: "People with access" })).toHaveCount(0);
+    await expect(ed.getByRole("region", { name: "People with access" })).toContainText("Ed Editor (you)");
     await ed.getByRole("button", { name: "Close dialog" }).click();
     await ed.getByRole("button", { name: "Editor settings", exact: true }).click();
     await expect(ed.getByLabel("Workspace name", { exact: true })).toHaveCount(0);

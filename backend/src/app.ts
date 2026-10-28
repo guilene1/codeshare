@@ -345,11 +345,7 @@ export function createApp(
     // Owners manage their workspace; unclaimed legacy workspaces keep v1 link management.
     res.locals.canManage =
       access === "owner" || (access === "editor" && !room.owner_id);
-    next();
-  });
-  app.get("/api/rooms/:roomId", (_req, res) => {
-    const room = res.locals.workspace;
-    const session = res.locals.session as Session | undefined;
+    // Read on every request, so a removed or downgraded share loses sharing at once.
     const share = session
       ? rooms.db
           .prepare(
@@ -357,8 +353,18 @@ export function createApp(
           )
           .get(room.id, session.user.id)
       : undefined;
+    res.locals.sharedRole = share?.role;
+    // Sharing (Edit Link and account shares): the owner and signed-in editor shares.
+    // Edit Link guests, viewer shares and students never manage sharing.
+    res.locals.canShare =
+      access === "owner" || (access === "editor" && share?.role === "editor");
+    next();
+  });
+  app.get("/api/rooms/:roomId", (_req, res) => {
+    const room = res.locals.workspace;
+    const sharedRole = res.locals.sharedRole;
     res.json({
-      ...(share ? { sharedRole: share.role } : {}),
+      ...(sharedRole ? { sharedRole } : {}),
       id: room.id,
       name: room.name,
       description: room.description,
@@ -366,7 +372,8 @@ export function createApp(
       owned: !!room.owner_id,
       // A valid editor link for an unowned workspace can be claimed once.
       claimable: !room.owner_id && res.locals.linkValid,
-      ...(res.locals.access === "owner"
+      canShare: res.locals.canShare,
+      ...(res.locals.canShare
         ? { hasEditorLink: !!room.has_editor_link }
         : {}),
     });
@@ -479,10 +486,10 @@ export function createApp(
     res.json({ ok: true });
   });
   app.use("/api/rooms/:roomId/editor-link", (_req, res, next) => {
-    if (res.locals.access !== "owner") {
-      res
-        .status(403)
-        .json({ error: "Only the workspace owner can manage editor links." });
+    if (!res.locals.canShare) {
+      res.status(403).json({
+        error: "Only the workspace owner and editors can manage editor links.",
+      });
       return;
     }
     next();
@@ -520,14 +527,24 @@ export function createApp(
     if (previous) rooms.record(id, "link.revoked", "Editor link", res.locals.actor);
     res.json({ ok: true });
   });
-  // Account sharing: owners add existing registered users as Viewer or Editor. This only
-  // places the workspace in their Shared with Me list (and, for editors, grants editing);
-  // public viewer links never require an account.
+  // Account sharing: owners and editors add existing registered users as Viewer or Editor.
+  // This only places the workspace in their Shared with Me list (and, for editors, grants
+  // editing); public viewer links never require an account.
   app.use("/api/rooms/:roomId/shares", (_req, res, next) => {
-    if (res.locals.access !== "owner") {
+    if (!res.locals.canShare) {
+      res.status(403).json({
+        error: "Only the workspace owner and editors can manage sharing.",
+      });
+      return;
+    }
+    next();
+  });
+  // The owner never has a share row, so it can't be changed or removed through sharing.
+  app.use("/api/rooms/:roomId/shares/:userId", (req, res, next) => {
+    if (req.params.userId === res.locals.workspace.owner_id) {
       res
         .status(403)
-        .json({ error: "Only the workspace owner can manage sharing." });
+        .json({ error: "The workspace owner's access can't be changed." });
       return;
     }
     next();
@@ -575,8 +592,13 @@ export function createApp(
         });
         return;
       }
-      if (user.id === session.user.id) {
-        res.status(400).json({ error: "You already own this workspace." });
+      if (user.id === res.locals.workspace.owner_id) {
+        res.status(400).json({
+          error:
+            user.id === session.user.id
+              ? "You already own this workspace."
+              : "That person owns this workspace and already has full access.",
+        });
         return;
       }
       const now = Date.now();
