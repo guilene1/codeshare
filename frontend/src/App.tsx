@@ -1687,6 +1687,8 @@ function Workspace({
               name={room.name}
               folder={folder}
               active={current?.id}
+              openTabs={openTabs}
+              onCloseTab={closeTab}
               canEdit={isEditor}
               connected={connected}
               onOpen={openLesson}

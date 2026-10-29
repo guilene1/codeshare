@@ -10,6 +10,7 @@ import {
   FolderPlus,
   Pencil,
   Trash2,
+  X,
 } from "lucide-react";
 import Modal from "./Modal";
 import type { CourseTree } from "../lib";
@@ -19,6 +20,9 @@ type Props = {
   name: string;
   folder: string | null;
   active: string | undefined;
+  // Files open as tabs in the current lesson; each gets a close X in its row.
+  openTabs: string[];
+  onCloseTab: (file: string) => void;
   canEdit: boolean;
   connected: boolean;
   onOpen: (folder: string | null, file?: string) => void;
@@ -29,6 +33,8 @@ export default function CourseExplorer({
   name,
   folder,
   active,
+  openTabs,
+  onCloseTab,
   canEdit,
   connected,
   onOpen,
@@ -202,20 +208,36 @@ export default function CourseExplorer({
           ))}
         {tree.documents
           .filter((file) => file.folder_id === parent)
-          .map((file) => (
-            <button
-              key={file.id}
-              className={
-                "tree-file" +
-                (file.id === active && parent === folder ? " active" : "")
-              }
-              style={{ paddingLeft: 14 + depth * 12 }}
-              onClick={() => onOpen(parent, file.id)}
-            >
-              <FileCode2 size={15} />
-              <span title={file.filename}>{file.filename}</span>
-            </button>
-          ))}
+          .map((file) => {
+            // Tabs belong to the open lesson, so only its files can have one.
+            const tabOpen = parent === folder && openTabs.includes(file.id);
+            return (
+              <div key={file.id} className={"tree-file-row" + (tabOpen ? " tab-open" : "")}>
+                <button
+                  className={
+                    "tree-file" +
+                    (file.id === active && parent === folder ? " active" : "")
+                  }
+                  style={{ paddingLeft: 14 + depth * 12 }}
+                  onClick={() => onOpen(parent, file.id)}
+                >
+                  <FileCode2 size={15} />
+                  <span title={file.filename}>{file.filename}</span>
+                </button>
+                {/* A sibling, not a child, so closing never opens or selects the file. */}
+                {tabOpen && (
+                  <button
+                    className="tree-file-close"
+                    aria-label={"Close tab " + file.filename}
+                    title="Close tab"
+                    onClick={() => onCloseTab(file.id)}
+                  >
+                    <X size={13} />
+                  </button>
+                )}
+              </div>
+            );
+          })}
       </>
     );
   }
