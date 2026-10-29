@@ -2109,6 +2109,17 @@ option {
   gap: 9px;
   margin-top: 24px;
 }
+/* Create Workspace is taller than many laptop screens: keep its buttons pinned to the
+   bottom of the dialog (over the dialog's own background) while the options scroll. */
+.create-workspace-actions {
+  position: sticky;
+  bottom: -26px;
+  z-index: 1;
+  margin: 24px -26px 0;
+  padding: 14px 26px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}
 .shortcut-list > div {
   display: flex;
   justify-content: space-between;

@@ -97,7 +97,8 @@ export default function CreateWorkspace({
             {error}
           </p>
         )}
-        <div className="dialog-actions">
+        {/* Pinned while the dialog scrolls, so Create stays in view on shorter screens. */}
+        <div className="dialog-actions create-workspace-actions">
           <button
             type="button"
             className="button secondary"
