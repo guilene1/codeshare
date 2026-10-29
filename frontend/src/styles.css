@@ -1072,6 +1072,48 @@ option {
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+/* Explorer rows of files open as tabs carry a close X: shown on hover or keyboard focus,
+   always on touch screens (no hover there). */
+.tree-file-row {
+  position: relative;
+}
+.tree-file-row.tab-open .tree-file {
+  padding-right: 34px;
+}
+.tree-file-close {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  opacity: 0;
+}
+.tree-file-row:hover .tree-file-close,
+.tree-file-row:focus-within .tree-file-close {
+  opacity: 1;
+}
+.tree-file-close:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.tree-file-close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+@media (hover: none) {
+  .tree-file-close {
+    opacity: 1;
+  }
+}
 .tree-file .file-presence {
   width: 5px;
   height: 5px;

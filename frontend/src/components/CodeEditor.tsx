@@ -12,6 +12,7 @@ import type { WebsocketProvider } from "y-websocket";
 import type { FileDoc, Settings } from "../lib";
 import { aliases, isDocumentLanguage } from "../markdown";
 import { attachDocumentBlocks } from "./editorBlocks";
+import { documentTokenRules, editorLanguage } from "./documentLanguages";
 import { imagesIn, type FoundImages } from "../documentImages";
 
 self.MonacoEnvironment = {
@@ -113,6 +114,7 @@ monaco.editor.defineTheme("devshare-dark", {
     { token: "type.yaml", foreground: "9CDCFE" },
     { token: "string.key.json", foreground: "9CDCFE" },
     { token: "variable.hcl", foreground: "9CDCFE" },
+    ...documentTokenRules.dark,
   ],
   colors: {
     "editor.background": "#11151D",
@@ -137,6 +139,7 @@ monaco.editor.defineTheme("devshare-light", {
     { token: "type.yaml", foreground: "0451A5" },
     { token: "string.key.json", foreground: "0451A5" },
     { token: "variable.hcl", foreground: "0451A5" },
+    ...documentTokenRules.light,
   ],
   colors: {
     "editor.background": "#FFFFFF",
@@ -230,7 +233,7 @@ export default function CodeEditor({
             if (selection && !selection.isEmpty() && currentModel)
               createBlockRef.current?.(
                 currentModel.getValueInRange(selection),
-                currentModel.getLanguageId(),
+                languageRef.current,
               );
           },
         });
@@ -307,7 +310,7 @@ export default function CodeEditor({
     if (editorRef.current?.getModel())
       monaco.editor.setModelLanguage(
         editorRef.current.getModel()!,
-        file.language,
+        editorLanguage(file.language),
       );
   }, [file.language]);
   const theme =
@@ -321,7 +324,7 @@ export default function CodeEditor({
   return (
     <Editor
       height="100%"
-      language={file.language}
+      language={editorLanguage(file.language)}
       theme={theme}
       onMount={mount}
       loading={<div className="editor-loading">Preparing your workspace…</div>}
