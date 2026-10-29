@@ -1,6 +1,7 @@
 // Share popup "Editors · Can edit" (Edit Link management for the owner and account editors,
-// masked, page-session only, confirmed replace/revoke) and the Explorer/Connected vertical splitter.
+// masked, copyable again later, confirmed replace/revoke) and the Explorer/Connected vertical splitter.
 import { test, expect, type Page, type Browser } from "@playwright/test";
+import { execFileSync } from "node:child_process";
 import { createWorkspace, signUp, uniqueEmail } from "./helpers";
 
 async function apiCall(page: Page, path: string, method = "GET", body?: unknown) {
@@ -26,10 +27,19 @@ const linkAccess = (page: Page, token: string) =>
     return r.ok ? (await r.json()).access : r.status;
   }, token);
 const tokenOf = (link: string) => link.split("/edit/")[1];
+// Gives a workspace a link created outside the app (fingerprint only, like links made before
+// Edit Links were kept), with the operator recovery script; returns that link.
+function operatorRotate(id: string) {
+  const args = ["scripts/recover-editor.mjs", id, "http://localhost", "--rotate"];
+  const out = process.env.DEVSHARE_BASE_URL
+    ? execFileSync("docker", ["compose", "-p", process.env.DEVSHARE_COMPOSE_PROJECT ?? "devshare-local", "exec", "-T", "application", "node", ...args])
+    : execFileSync("node", args, { env: { ...process.env, DB_PATH: "data/e2e.sqlite" } });
+  return out.toString().trim();
+}
 const share = (page: Page) => page.getByRole("button", { name: "Share", exact: true }).click();
 const editors = (page: Page) => page.getByRole("region", { name: "Editors" });
 
-test("owner: Editors · Can edit sits below Students, masked, kept for the page session, confirmed replace and revoke", async ({ page, context }) => {
+test("owner: Editors · Can edit sits below Students, masked, copyable again after returning, confirmed replace and revoke", async ({ page, context }) => {
   test.setTimeout(120_000);
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await signUp(page, "Share Owner");
@@ -62,7 +72,7 @@ test("owner: Editors · Can edit sits below Students, masked, kept for the page 
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(link);
   expect(await linkAccess(page, tokenOf(link))).toBe("editor");
 
-  // Kept in page memory: closing and reopening the popup still shows it.
+  // Closing and reopening the popup still shows it.
   await page.getByRole("button", { name: "Close dialog" }).click();
   await share(page);
   await expect(editors(page).getByLabel("Edit link", { exact: true })).toHaveValue(link);
@@ -70,24 +80,53 @@ test("owner: Editors · Can edit sits below Students, masked, kept for the page 
   const stored = await page.evaluate(() => JSON.stringify({ ...localStorage }) + JSON.stringify({ ...sessionStorage }));
   expect(stored).not.toContain(tokenOf(link));
 
-  // After a refresh it cannot be shown again; the explanation says so.
+  // Returning later (via My Workspaces, or after a refresh) shows the same active link,
+  // masked, with Copy and Replace but no Create, and copying it changes nothing.
+  for (const returnTo of ["My Workspaces", "refresh"]) {
+    if (returnTo === "refresh") await page.reload();
+    else {
+      await page.goto("/workspaces");
+      await page.getByRole("article", { name: "Share popup" }).getByRole("button", { name: "Open" }).click();
+    }
+    await expect(page.locator(".status-bar")).toContainText("Connected");
+    await share(page);
+    const again = editors(page).getByLabel("Edit link", { exact: true });
+    await expect(again).toHaveValue(link);
+    await expect(again).toHaveAttribute("type", "password");
+    await expect(editors(page).getByRole("button", { name: "Create Edit Link", exact: true })).toHaveCount(0);
+    await expect(editors(page).getByRole("button", { name: "Replace link", exact: true })).toBeVisible();
+    await page.evaluate(() => navigator.clipboard.writeText(""));
+    await editors(page).getByRole("button", { name: "Copy Edit Link", exact: true }).click();
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(link);
+    expect(await linkAccess(page, tokenOf(link))).toBe("editor"); // the same link, still active
+    await page.getByRole("button", { name: "Close dialog" }).click();
+  }
+  const storedLater = await page.evaluate(() => JSON.stringify({ ...localStorage }) + JSON.stringify({ ...sessionStorage }));
+  expect(storedLater).not.toContain(tokenOf(link));
+  await share(page);
+
+  // A link from before links were kept (only its fingerprint stored) still can't be shown,
+  // keeps working, and is not replaced by opening Share.
+  const legacy = operatorRotate(page.url().split("/w/")[1].split(/[/?]/)[0]);
+  await page.getByRole("button", { name: "Close dialog" }).click();
   await page.reload();
   await expect(page.locator(".status-bar")).toContainText("Connected");
   await share(page);
   await expect(editors(page).getByLabel("Edit link", { exact: true })).toHaveCount(0);
   await expect(editors(page)).toContainText("can't be displayed again");
-  expect(await linkAccess(page, tokenOf(link))).toBe("editor"); // still active
+  expect(await linkAccess(page, tokenOf(legacy))).toBe("editor");
+  expect(await linkAccess(page, tokenOf(link))).toBe(403); // the operator rotation revoked it
 
   // Replace needs confirmation; Cancel changes nothing.
   await editors(page).getByRole("button", { name: "Replace link", exact: true }).click();
   await expect(editors(page).getByRole("group", { name: "Confirm Edit Link change" })).toContainText("Replace the Edit Link?");
   await editors(page).getByRole("button", { name: "Cancel", exact: true }).click();
-  expect(await linkAccess(page, tokenOf(link))).toBe("editor");
+  expect(await linkAccess(page, tokenOf(legacy))).toBe("editor");
   await editors(page).getByRole("button", { name: "Replace link", exact: true }).click();
   await editors(page).getByRole("button", { name: "Yes, replace link" }).click();
   const replaced = await editors(page).getByLabel("Edit link", { exact: true }).inputValue();
-  expect(replaced).not.toBe(link);
-  expect(await linkAccess(page, tokenOf(link))).toBe(403); // old link stops working
+  expect(replaced).not.toBe(legacy);
+  expect(await linkAccess(page, tokenOf(legacy))).toBe(403); // old link stops working
   expect(await linkAccess(page, tokenOf(replaced))).toBe("editor");
 
   // Revoke needs confirmation too.
@@ -124,18 +163,25 @@ test("account editors manage the Edit Link and sharing like the owner; link gues
     await editors(owner).getByRole("button", { name: "Create Edit Link", exact: true }).click();
     const ownerLink = await editors(owner).getByLabel("Edit link", { exact: true }).inputValue();
 
-    // Account editor: the full Share popup. The owner's link exists but is never shown.
-    await ed.goto(url);
+    // Account editor, arriving from Shared with Me: the full Share popup, with the owner's
+    // active link ready to copy (masked), and no Create.
+    await ed.goto("/workspaces");
+    await ed.locator(".shared-with-me").getByRole("article", { name: "Edit link permissions" }).getByRole("button", { name: "Open" }).click();
     await expect(ed.getByLabel("Workspace access")).toContainText("Editing");
     await share(ed);
     const headings = await ed.getByRole("dialog").locator("h3").allTextContents();
     expect(headings.map((h) => h.trim())).toEqual(["Students · View only", "Editors · Can edit", "People with access"]);
-    await expect(editors(ed)).toContainText("can't be displayed again");
-    await expect(editors(ed).getByLabel("Edit link", { exact: true })).toHaveCount(0);
-    expect(await ed.content()).not.toContain(tokenOf(ownerLink));
+    await expect(editors(ed).getByLabel("Edit link", { exact: true })).toHaveValue(ownerLink);
+    await expect(editors(ed).getByLabel("Edit link", { exact: true })).toHaveAttribute("type", "password");
+    await expect(editors(ed).getByRole("button", { name: "Create Edit Link", exact: true })).toHaveCount(0);
+    await editors(ed).getByRole("button", { name: "Copy Edit Link", exact: true }).click();
+    expect(await ed.evaluate(() => navigator.clipboard.readText())).toBe(ownerLink);
+    expect(await linkAccess(ed, tokenOf(ownerLink))).toBe("editor");
     // Replace (confirmed), copy, revoke and create again.
     await editors(ed).getByRole("button", { name: "Replace link", exact: true }).click();
     await editors(ed).getByRole("button", { name: "Yes, replace link" }).click();
+    // The owner's link was on screen; wait for the new one to replace it.
+    await expect(editors(ed).getByLabel("Edit link", { exact: true })).not.toHaveValue(ownerLink);
     const replaced = await editors(ed).getByLabel("Edit link", { exact: true }).inputValue();
     expect(await linkAccess(ed, tokenOf(ownerLink))).toBe(403);
     expect(await linkAccess(ed, tokenOf(replaced))).toBe("editor");
@@ -148,6 +194,18 @@ test("account editors manage the Edit Link and sharing like the owner; link gues
     await editors(ed).getByRole("button", { name: "Create Edit Link", exact: true }).click();
     const link = await editors(ed).getByLabel("Edit link", { exact: true }).inputValue();
     expect(await linkAccess(ed, tokenOf(link))).toBe("editor");
+    // The editor's link is there when the editor comes back, and for the owner too.
+    await ed.getByRole("button", { name: "Close dialog" }).click();
+    await ed.reload();
+    await expect(ed.locator(".status-bar")).toContainText("Connected");
+    await share(ed);
+    await expect(editors(ed).getByLabel("Edit link", { exact: true })).toHaveValue(link);
+    await owner.getByRole("button", { name: "Close dialog" }).click();
+    await owner.reload();
+    await expect(owner.locator(".status-bar")).toContainText("Connected");
+    await share(owner);
+    await expect(editors(owner).getByLabel("Edit link", { exact: true })).toHaveValue(link);
+    await owner.getByRole("button", { name: "Close dialog" }).click();
 
     // The editor invites another editor, who also gets the full popup.
     const people = ed.getByRole("region", { name: "People with access" });
@@ -197,6 +255,7 @@ test("account editors manage the Edit Link and sharing like the owner; link gues
     await expect(vera.getByLabel("Workspace access")).toContainText("View Only");
     await expect(vera.getByRole("button", { name: "Share", exact: true })).toHaveCount(0);
     expect((await apiCall(vera, "/shares")).status).toBe(403);
+    expect((await apiCall(vera, "/editor-link")).status).toBe(403);
     // Edit Link holder: edits, sees only their own link (masked), with no management.
     await guest.goto(link);
     await guest.getByLabel("Your name").fill("Guest");
@@ -210,6 +269,7 @@ test("account editors manage the Edit Link and sharing like the owner; link gues
     await student.goto(url);
     await expect(student.getByLabel("Workspace access")).toContainText("View Only");
     expect(await student.content()).not.toContain(tokenOf(link));
+    expect((await apiCall(student, "/editor-link")).status).toBe(403);
     expect((await apiCall(student, "/documents", "POST", { filename: "x.md", language: "markdown" })).status).toBe(403);
   } finally {
     for (const c of contexts) await c.close().catch(() => {});

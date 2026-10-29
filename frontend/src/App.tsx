@@ -640,8 +640,10 @@ function Workspace({
         ? "blocks"
         : "editor",
     ),
+    // Documents open in Preview; an Edit or Split choice then applies to every document
+    // opened during this page session (a reload returns to Preview).
     [chosenMode, setMarkdownMode] = useState<"edit" | "split" | "preview">(
-      "edit",
+      "preview",
     ),
     [blockDialog, setBlockDialog] = useState<
       (BlockDraft & { mode: "insert" | "selection" | "lesson" }) | null
@@ -798,11 +800,6 @@ function Workspace({
   useEffect(() => {
     if (isEditor) storeLocal("devshare.lastLesson." + id, folder);
   }, [isEditor, id, folder]);
-  useEffect(() => {
-    setMarkdownMode(
-      isEditor ? (window.innerWidth > 1100 ? "split" : "edit") : "preview",
-    );
-  }, [current?.id, isEditor]);
   function createBlockFromSelection(content: string, language: string) {
     if (!isEditor || !content) return;
     setBlockDialog({
@@ -1981,6 +1978,17 @@ function Workspace({
                         </div>
                       )}
                     </>
+                  )}
+                  {/* Same as the tab's X: hides the tab in this browser, never deletes the file. */}
+                  {current && (
+                    <button
+                      className="icon-button"
+                      aria-label="Close current file"
+                      title="Close file (Alt+W)"
+                      onClick={() => closeTab(current.id)}
+                    >
+                      <X size={15} />
+                    </button>
                   )}
                   {isEditor && (
                     <>

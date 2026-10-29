@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { signIn, signUp } from "./helpers";
+import { chooseDocumentView, signIn, signUp } from "./helpers";
 
 test("instructor's account dashboard follows them across devices, previews safe live notes and turns an exact selection into an inline lesson block", async ({
   browser,
@@ -75,6 +75,8 @@ test("instructor's account dashboard follows them across devices, previews safe 
         "aria-selected",
         "true",
       );
+      // Documents open in Preview: type into the source beside it.
+      if (/\.(md|txt)$/.test(name)) await chooseDocumentView(owner, "Split");
       await owner.locator(".monaco-editor textarea").first().focus();
       await owner.evaluate(
         (content) => navigator.clipboard.writeText(content),

@@ -221,8 +221,7 @@ export default function AccessShare({
   selfId?: string;
   hasEditorLink?: boolean;
   folderId?: string | null;
-  // A link created during this page session. Only its hash is stored on the server, so it
-  // lives in memory alone (never browser storage) and is gone after a refresh.
+  // A link created during this page session (memory only, never browser storage).
   freshToken: string;
   onFreshToken: (token: string) => void;
   copy: (value: string, label: string) => void;
@@ -234,11 +233,30 @@ export default function AccessShare({
   const [confirm, setConfirm] = useState<"replace" | "revoke" | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // The active link as stored on the server: undefined while loading, "" when it can't be
+  // shown (links created before links were stored, or none). Held in memory only.
+  const [storedToken, setStoredToken] = useState<string | undefined>(
+    canShare && hasEditorLink && !freshToken ? undefined : "",
+  );
+  useEffect(() => {
+    if (!canShare || !hasEditorLink || freshToken) return;
+    let canceled = false;
+    api<{ token: string | null }>(`/rooms/${id}/editor-link`)
+      .then((result) => !canceled && setStoredToken(result.token ?? ""))
+      .catch((e) => {
+        if (canceled) return;
+        setStoredToken("");
+        setError((e as Error).message);
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [id, canShare, hasEditorLink, freshToken]);
   const base = location.origin + "/w/" + id;
   const lesson = folderId ? "?folder=" + folderId : "";
   const studentLink = base + lesson;
-  // Managers see only a link they created on this page; the stored hash can't be shown.
-  const token = canShare ? freshToken : editorToken;
+  // Managers see the active link (just created, or fetched); guests see the one they used.
+  const token = canShare ? freshToken || storedToken : editorToken;
   const editorLink = token ? base + "/edit/" + token + lesson : "";
   async function manage(method: "POST" | "DELETE") {
     setBusy(true);
@@ -255,6 +273,7 @@ export default function AccessShare({
       } else {
         await api(`/rooms/${id}/editor-link`, "DELETE");
         onFreshToken("");
+        setStoredToken("");
         onLinkChange(false);
       }
       setShow(false);
@@ -348,6 +367,8 @@ export default function AccessShare({
                   <button
                     className="icon-button"
                     aria-label="Copy edit link"
+                    // Not while a replace or revoke is in flight: this link is about to stop working.
+                    disabled={busy}
                     onClick={() => copy(editorLink, "Edit link")}
                   >
                     <Copy size={17} />
@@ -356,12 +377,13 @@ export default function AccessShare({
               </label>
               {canShare && (
                 <p className="fine-print">
-                  Available until you refresh or leave this page. For security,{" "}
-                  {BRAND} can't show this link again later.
+                  Only the owner and editors can see this link. Replace it if it reached
+                  the wrong people: the current link then stops working.
                 </p>
               )}
               <button
                 className="button secondary full"
+                disabled={busy}
                 onClick={() => copy(editorLink, "Edit link")}
               >
                 <Link size={16} />
@@ -371,9 +393,11 @@ export default function AccessShare({
           ) : (
             canShare && (
               <p className="fine-print">
-                {hasEditorLink
-                  ? `An Edit Link is active, but it can't be displayed again: for security, ${BRAND} keeps only a fingerprint of it and showed it once when it was created. Replace it to get a new link; the current link will stop working.`
-                  : "No Edit Link exists yet. Create one to let a co-editor edit without an account."}
+                {!hasEditorLink
+                  ? "No Edit Link exists yet. Create one to let a co-editor edit without an account."
+                  : storedToken === undefined
+                    ? "Loading the Edit Link…"
+                    : `An Edit Link is active, but it can't be displayed again: it was created before ${BRAND} could keep links for you, so only a fingerprint of it is stored. Replace it to get a link you can copy any time; the current link will stop working.`}
               </p>
             )
           )}

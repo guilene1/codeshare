@@ -1,4 +1,4 @@
-import { expect, type Page } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 export const PASSWORD = "Correct-Horse-Battery-42";
 export const uniqueEmail = (prefix = "instructor") =>
@@ -41,11 +41,34 @@ export async function createWorkspace(
   if (options.description)
     await dialog.getByLabel(/Description/).fill(options.description);
   if (options.template) await dialog.getByText(options.template, { exact: true }).click();
-  await dialog.getByRole("button", { name: "Create Workspace", exact: true }).click();
+  const create = () =>
+    Promise.all([
+      page.waitForResponse((r) => r.request().method() === "POST" && new URL(r.url()).pathname === "/api/rooms"),
+      dialog.getByRole("button", { name: "Create Workspace", exact: true }).click(),
+    ]).then(([response]) => response);
+  let response = await create();
+  // The server allows 10 new workspaces per minute per IP, and the whole suite runs from one
+  // IP: wait out the limit (as the server's Retry-After says) and create it once more.
+  if (response.status() === 429) {
+    const wait = Number(response.headers()["retry-after"] ?? 60);
+    console.log(`createWorkspace: rate limited, retrying in ${wait}s`);
+    test.info().setTimeout(test.info().timeout + (wait + 5) * 1000);
+    await page.waitForTimeout((wait + 1) * 1000);
+    response = await create();
+  }
+  expect(response.status()).toBe(201);
   await expect(page.getByLabel("Workspace access")).toContainText("Editing");
   await expect(page.locator(".status-bar")).toContainText("Connected");
   expect(page.url()).not.toContain("/edit/");
   return page.url().split("?")[0];
+}
+
+// Documents (Markdown, Plain Text) open in Preview. Tests that type into the source switch
+// view first; the choice then holds for the rest of the page session.
+export async function chooseDocumentView(page: Page, view: "Edit" | "Split" | "Preview") {
+  const button = page.locator(".markdown-switch").getByRole("button", { name: view, exact: true });
+  await button.click();
+  await expect(button).toHaveAttribute("aria-pressed", "true");
 }
 
 // Opens a file from the Explorer (tabs only show files the user has opened).

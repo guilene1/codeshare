@@ -36,6 +36,10 @@ export function openDatabase(path: string) {
   const columns = db.prepare("PRAGMA table_info(rooms)").all();
   if (!columns.some((column) => column.name === "editor_token_hash"))
     db.exec("ALTER TABLE rooms ADD COLUMN editor_token_hash TEXT");
+  // Additive: the Edit Link sealed for later retrieval (see linkVault.ts); NULL for links
+  // created before it existed, which keep working but cannot be shown again.
+  if (!columns.some((column) => column.name === "editor_token_sealed"))
+    db.exec("ALTER TABLE rooms ADD COLUMN editor_token_sealed TEXT");
   if (!columns.some((column) => column.name === "description"))
     db.exec(
       "ALTER TABLE rooms ADD COLUMN description TEXT NOT NULL DEFAULT ''",

@@ -42,6 +42,7 @@ import {
 } from "./auth.js";
 import { accountRoutes, authLimits, type AuthLimits } from "./accountRoutes.js";
 import { migrateSnippets } from "./migrate.js";
+import { LinkVault } from "./linkVault.js";
 import {
   createMailer,
   EmailOutbox,
@@ -75,15 +76,16 @@ export function createApp(
   } = {},
 ) {
   const projectRoot = fileURLToPath(new URL("../../", import.meta.url));
+  const dbPath =
+    options.dbPath ??
+    process.env.DB_PATH ??
+    resolve(projectRoot, "data/devshare.sqlite");
   const rooms = new Rooms(
-    openDatabase(
-      options.dbPath ??
-        process.env.DB_PATH ??
-        resolve(projectRoot, "data/devshare.sqlite"),
-    ),
+    openDatabase(dbPath),
     options.checkpointMs,
   );
   const images = new Images(rooms.db);
+  const links = new LinkVault(dbPath);
   const origins = new Set(
     options.origins ??
       (
@@ -501,7 +503,17 @@ export function createApp(
         "The private editor link was replaced or revoked",
       );
   };
-  // Creates or replaces the private co-editor link; the token is returned only once.
+  // The active Edit Link for the owner and signed-in editors (gated above), so they can copy
+  // it again later. Links created before sealing existed come back as null.
+  app.get("/api/rooms/:roomId/editor-link", (_req, res) => {
+    const id = res.locals.workspace.id,
+      row = rooms.db
+        .prepare("SELECT editor_token_hash,editor_token_sealed FROM rooms WHERE id=?")
+        .get(id);
+    res.set("Cache-Control", "no-store");
+    res.json({ token: links.open(id, row?.editor_token_sealed, row?.editor_token_hash) ?? null });
+  });
+  // Creates or replaces the private co-editor link.
   app.post("/api/rooms/:roomId/editor-link", (_req, res) => {
     const id = res.locals.workspace.id,
       token = newToken(),
@@ -509,8 +521,8 @@ export function createApp(
         .prepare("SELECT editor_token_hash FROM rooms WHERE id=?")
         .get(id)?.editor_token_hash;
     rooms.db
-      .prepare("UPDATE rooms SET editor_token_hash=? WHERE id=?")
-      .run(hashEditorToken(token), id);
+      .prepare("UPDATE rooms SET editor_token_hash=?,editor_token_sealed=? WHERE id=?")
+      .run(hashEditorToken(token), links.seal(id, token), id);
     dropLinkEditors(previous);
     rooms.record(id, previous ? "link.replaced" : "link.created", "Editor link", res.locals.actor);
     res.status(201).json({ token });
@@ -521,7 +533,7 @@ export function createApp(
         .prepare("SELECT editor_token_hash FROM rooms WHERE id=?")
         .get(id)?.editor_token_hash;
     rooms.db
-      .prepare("UPDATE rooms SET editor_token_hash=NULL WHERE id=?")
+      .prepare("UPDATE rooms SET editor_token_hash=NULL,editor_token_sealed=NULL WHERE id=?")
       .run(id);
     dropLinkEditors(previous);
     if (previous) rooms.record(id, "link.revoked", "Editor link", res.locals.actor);

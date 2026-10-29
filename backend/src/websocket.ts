@@ -107,7 +107,16 @@ export function setupWebsocket(
     noServer: true,
     // Fits one update replacing a whole 2 MB lesson (deletions plus insertions), with headroom.
     maxPayload: 2 * MAX_CONTENT + 512 * 1024,
-    perMessageDeflate: false,
+    // Compresses the initial lesson sync (Markdown shrinks ~2.5-3x) at the fastest level.
+    // Small presence and keystroke messages are sent as-is, and no compression context is
+    // kept between messages, which keeps per-connection memory low. maxPayload still applies
+    // to the decompressed size of incoming messages.
+    perMessageDeflate: {
+      threshold: 1024,
+      zlibDeflateOptions: { level: 1 },
+      serverNoContextTakeover: true,
+      clientNoContextTakeover: true,
+    },
     // Never echo the credential subprotocol in the handshake response.
     handleProtocols: (protocols) =>
       protocols.has("devshare") ? "devshare" : false,

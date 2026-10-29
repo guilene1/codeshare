@@ -226,6 +226,15 @@ python -c "import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); print(db.execute
 
 `scripts/backup.sh` remains in the repository as a simpler manual alternative (it uses the same snapshot script but a different object name and no size logging); production uses the systemd timer above.
 
+**Edit Link key.** Owners and editors can copy an active Edit Link again because the app stores each new link encrypted (AES-256-GCM) in `rooms.editor_token_sealed`. The key is `/data/edit-link.key` in the `sqlite_data` volume, created automatically on first start (owner `node`, mode 600). It is deliberately **not** in the S3 backups, which contain only the database, so a leaked backup cannot reveal working links. Keep one copy of the key off-server (for example in a password manager), taken once after the first deploy that creates it:
+
+```sh
+ssh -i ~/.ssh/devshare_lightsail ubuntu@52.206.92.51 \
+  'sudo docker compose -f /opt/devshare/docker-compose.yml exec -T application cat /data/edit-link.key'
+```
+
+Never put the key in Git, `.env`, Docker images, logs or the backup bucket. Without the key, Edit Links keep working (their fingerprints are in the database) but cannot be shown again until an owner or editor replaces them. Links created before this feature have no stored copy and behave the same way. Restoring a backup on the existing server (section 5) leaves the key in place.
+
 ## 5. Emergency restore
 
 **Restore the database on the existing server** during a maintenance window. Download and verify the backup on a workstation (section 4), then:
@@ -248,7 +257,14 @@ rm /tmp/devshare-restore.sqlite
 
 Open a known workspace to confirm its content. The replaced database stays in `/data/pre-restore-<timestamp>/` inside the volume. Editor links continue to work because the snapshot preserves their hashes; restoring an older backup can re-enable a link rotated after that backup, so rotate again with `scripts/recover-editor.mjs --rotate` if needed.
 
-**If the server is lost:** create a new `micro_3_0` Ubuntu 24.04 instance in us-east-1, reattach the static IP `codeshare-static-ip` (DNS then needs no change), apply the firewall from section 1, follow section 2, load images built off-server (section 3), restore the database as above, and re-create the backup script, credentials and timer (section 4 and appendix; create a fresh access key).
+**If the server is lost:** create a new `micro_3_0` Ubuntu 24.04 instance in us-east-1, reattach the static IP `codeshare-static-ip` (DNS then needs no change), apply the firewall from section 1, follow section 2, load images built off-server (section 3), restore the database as above, and re-create the backup script, credentials and timer (section 4 and appendix; create a fresh access key). If you kept the Edit Link key (section 4), restore it before starting the application, so existing links can be copied again:
+
+```sh
+# On the new server, with the key saved as /tmp/edit-link.key (delete it afterwards).
+sudo docker compose run --rm --no-deps -u root -v /tmp/edit-link.key:/restore.key:ro application sh -c '
+  cp /restore.key /data/edit-link.key && chown node:node /data/edit-link.key && chmod 600 /data/edit-link.key'
+rm /tmp/edit-link.key
+```
 
 ## 5a. Accounts (v2) operations
 

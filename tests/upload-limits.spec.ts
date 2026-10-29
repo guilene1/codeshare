@@ -3,7 +3,7 @@
 // "code block into a new lesson" flow that posts content over REST.
 import { test, expect, type Page } from "@playwright/test";
 import { DatabaseSync } from "node:sqlite";
-import { createWorkspace, signUp } from "./helpers";
+import { chooseDocumentView, createWorkspace, signUp } from "./helpers";
 
 const KB = 1024;
 function code(bytes: number, seed = "") {
@@ -30,6 +30,8 @@ async function newFile(page: Page, name: string) {
   await page.getByLabel("Filename", { exact: true }).fill(name);
   await page.getByRole("dialog").getByRole("button", { name: "Create file", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByRole("tab", { name, exact: true })).toHaveAttribute("aria-selected", "true");
+  await chooseDocumentView(page, "Split");
   await page.locator(".monaco-editor .view-lines").first().click();
 }
 // The owner's API calls from inside the page (session cookie + CSRF), like any API client.
@@ -104,6 +106,7 @@ test("API updates appear live in an open editor; stale API writes are refused; r
   expect(created.status).toBe(201);
   await page.locator(".sidebar").getByRole("button", { name: "notes.txt", exact: true }).click();
   await expect(page.getByRole("tab", { name: "notes.txt", exact: true })).toHaveAttribute("aria-selected", "true");
+  await chooseDocumentView(page, "Split");
 
   // A 300 KB replacement through the content API shows up in the open editor.
   const big = "Updated by the API\n" + code(300 * KB);

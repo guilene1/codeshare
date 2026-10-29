@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { createWorkspace, openFromExplorer, signUp } from "./helpers";
+import { chooseDocumentView, createWorkspace, openFromExplorer, signUp } from "./helpers";
 
 // Pasting sends one Yjs update; very fast synthetic typing would trip the
 // server's per-socket write-rate limit, which real typing never reaches.
@@ -43,6 +43,7 @@ test("lesson documents show inline code blocks with Copy; instructors insert, ed
       .getByRole("dialog")
       .getByRole("button", { name: "Create file", exact: true })
       .click();
+    await chooseDocumentView(owner, "Split");
     const editor = owner.locator(".monaco-editor textarea");
     await editor.focus();
     await paste(
@@ -337,8 +338,9 @@ test("typing ``` in a Markdown lesson creates a ChatGPT-style code block with it
       .getByRole("dialog")
       .getByRole("button", { name: "Create file", exact: true })
       .click();
-    // Split view: Markdown source on the left, rendered lesson on the right.
-    await expect(owner.getByRole("button", { name: "Split" })).toHaveAttribute("aria-pressed", "true");
+    // A new lesson opens in Preview; Split puts the Markdown source beside the rendered lesson.
+    await expect(owner.getByRole("button", { name: "Preview", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await chooseDocumentView(owner, "Split");
     await owner.locator(".monaco-editor .view-lines").click();
     await owner.keyboard.type("Run this to check your shell:", { delay: 15 });
     await owner.keyboard.press("Enter");
@@ -436,6 +438,7 @@ test("Plain Text documents: typing ``` creates interactive code blocks with Copy
       .click();
     await expect(owner.getByRole("dialog")).toHaveCount(0);
     await expect(owner.getByRole("banner").getByLabel("Programming language")).toHaveValue("plaintext");
+    await chooseDocumentView(owner, "Split");
     const editor = owner.locator(".monaco-editor").first();
     await editor.locator(".view-lines").click();
     await owner.keyboard.type("# Steps, kept as plain text", { delay: 10 });
