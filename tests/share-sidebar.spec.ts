@@ -115,7 +115,10 @@ test("owner: Editors · Can edit sits below Students, masked, copyable again aft
   await expect(editors(page).getByLabel("Edit link", { exact: true })).toHaveCount(0);
   await expect(editors(page)).toContainText("can't be displayed again");
   expect(await linkAccess(page, tokenOf(legacy))).toBe("editor");
-  expect(await linkAccess(page, tokenOf(link))).toBe(403); // the operator rotation revoked it
+  // The operator rotation revoked it. This workspace is Restricted, so a revoked link alone
+  // gets the same 404 as a missing workspace (it must not reveal that the workspace exists);
+  // link-visible workspaces still answer 403 (see the next test).
+  expect(await linkAccess(page, tokenOf(link))).toBe(404);
 
   // Replace needs confirmation; Cancel changes nothing.
   await editors(page).getByRole("button", { name: "Replace link", exact: true }).click();
@@ -126,7 +129,7 @@ test("owner: Editors · Can edit sits below Students, masked, copyable again aft
   await editors(page).getByRole("button", { name: "Yes, replace link" }).click();
   const replaced = await editors(page).getByLabel("Edit link", { exact: true }).inputValue();
   expect(replaced).not.toBe(legacy);
-  expect(await linkAccess(page, tokenOf(legacy))).toBe(403); // old link stops working
+  expect(await linkAccess(page, tokenOf(legacy))).toBe(404); // old link stops working
   expect(await linkAccess(page, tokenOf(replaced))).toBe("editor");
 
   // Revoke needs confirmation too.
@@ -134,7 +137,7 @@ test("owner: Editors · Can edit sits below Students, masked, copyable again aft
   await expect(editors(page).getByRole("group", { name: "Confirm Edit Link change" })).toContainText("Revoke the Edit Link?");
   await editors(page).getByRole("button", { name: "Yes, revoke link" }).click();
   await expect(editors(page)).toContainText("No Edit Link exists yet");
-  expect(await linkAccess(page, tokenOf(replaced))).toBe(403);
+  expect(await linkAccess(page, tokenOf(replaced))).toBe(404);
   await page.screenshot({ path: "test-results/share-popup-owner.png" });
 });
 

@@ -339,13 +339,8 @@ export function createApp(
         ? hashEditorToken(credential)
         : undefined;
     const linkValid = rooms.canEditHash(room.id as string, tokenHash);
-    if (req.headers.authorization && !linkValid) {
-      res.status(403).json({
-        error: "This private editor link is invalid or has been revoked.",
-      });
-      return;
-    }
     const session = res.locals.session as Session | undefined;
+    // An invalid or revoked link grants nothing, so access is the same with or without it.
     const access = workspaceAccess(
       rooms.db,
       (hash, user) => accounts.sessionValid(hash, user),
@@ -354,9 +349,18 @@ export function createApp(
     );
     // No access at all (a private workspace and no grant): the same 404 as a workspace that
     // doesn't exist, so neither its existence nor its name is revealed. This gate covers
-    // every /api/rooms/:roomId route (content, files, images, tree, blocks, sharing).
+    // every /api/rooms/:roomId route (content, files, images, tree, blocks, sharing). It runs
+    // before the link check: a fake or revoked link must not tell "private" from "missing".
     if (!canReadAccess(access)) {
       res.status(404).json({ error: notFound });
+      return;
+    }
+    // Only someone who can already open the workspace learns that their link is not valid
+    // (the editor then reopens it view-only, or through their account's share).
+    if (req.headers.authorization && !linkValid) {
+      res.status(403).json({
+        error: "This private editor link is invalid or has been revoked.",
+      });
       return;
     }
     res.locals.access = access;

@@ -174,19 +174,20 @@ export function setupWebsocket(
       const actor: Actor = session
         ? { kind: "user", id: session.user.id, name: session.user.displayName }
         : { kind: "link" };
+      // Checked before the lesson is loaded: a private workspace without a grant looks
+      // exactly like one that doesn't exist, and is never loaded into memory. It runs before
+      // the link check, so a fake or revoked link can't tell "private" from "missing" either.
+      if (!canReadAccess(access())) {
+        socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
+        socket.destroy();
+        return;
+      }
       if (
         credentials.length &&
         (credentials.length !== 1 ||
           !rooms.canEditHash(workspaceId, credentialHash))
       ) {
         socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
-        socket.destroy();
-        return;
-      }
-      // Checked before the lesson is loaded: a private workspace without a grant looks
-      // exactly like one that doesn't exist, and is never loaded into memory.
-      if (!canReadAccess(access())) {
-        socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
         socket.destroy();
         return;
       }

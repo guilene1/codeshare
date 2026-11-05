@@ -115,3 +115,37 @@ test("Restricted by default: students need link access; outsiders see nothing; s
     for (const c of contexts) await c.close().catch(() => {});
   }
 });
+
+test("a fake or revoked Edit Link shows the same not-found page for a Restricted workspace as for one that doesn't exist", async ({ browser }) => {
+  test.setTimeout(120_000);
+  const contexts = await Promise.all([0, 1].map(() => browser.newContext()));
+  const [owner, visitor] = await Promise.all(contexts.map((c) => c.newPage()));
+  try {
+    await signUp(owner, "Hidden Owner");
+    const url = await createWorkspace(owner, "Hidden course");
+    const id = url.split("/w/")[1];
+    await owner.getByRole("button", { name: "Share", exact: true }).click();
+    await owner.getByRole("dialog").getByRole("button", { name: "Create Edit Link", exact: true }).click();
+    const revoked = await owner.getByRole("dialog").getByLabel("Edit link", { exact: true }).inputValue();
+    await owner.getByRole("dialog").getByRole("button", { name: "Revoke link", exact: true }).click();
+    await owner.getByRole("dialog").getByRole("button", { name: "Yes, revoke link" }).click();
+    await expect(owner.getByRole("dialog")).toContainText("No Edit Link exists yet");
+    const fake = "x".repeat(43);
+    // What a visitor sees: the page text after it settles on "Workspace not found".
+    const seen = async (path: string) => {
+      await visitor.goto(path);
+      await expect(visitor.getByText("Workspace not found", { exact: false })).toBeVisible();
+      const text = await visitor.locator("body").innerText();
+      expect(text).not.toContain("Hidden course");
+      return text.replaceAll(id, "ID").replaceAll("AAAAAAAAAAAAAAAA", "ID");
+    };
+    const missing = await seen("/w/AAAAAAAAAAAAAAAA/edit/" + fake);
+    expect(await seen(`/w/${id}/edit/${fake}`)).toBe(missing);
+    expect(await seen(new URL(revoked).pathname)).toBe(missing);
+    // And the owner's own access is unaffected.
+    await owner.reload();
+    await expect(owner.getByLabel("Workspace access")).toBeVisible();
+  } finally {
+    for (const c of contexts) await c.close().catch(() => {});
+  }
+});
