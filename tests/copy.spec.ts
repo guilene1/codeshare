@@ -173,7 +173,7 @@ test("every reader can copy every code block exactly; view-only stays read-only"
     const veraEmail = await signUp(vera, "Vera Viewer", uniqueEmail("vera"));
     const edEmail = await signUp(ed, "Ed Editor", uniqueEmail("ed"));
     await signUp(owner, "Olivia Owner");
-    const url = await createWorkspace(owner, "Copy everything lab");
+    const url = await createWorkspace(owner, "Copy everything lab", { studentLink: true });
     const { id, statuses } = await setUp(owner, veraEmail, edEmail);
     expect(statuses).toEqual([201, 201, 201, 201, 201, 201, 201]);
     const expected = BLOCKS.map(([, code]) => code);

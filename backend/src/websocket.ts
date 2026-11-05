@@ -13,6 +13,8 @@ import {
   type Room,
 } from "./rooms.js";
 import {
+  canEditAccess,
+  canReadAccess,
   hashEditorToken,
   TOKEN_PATTERN,
   workspaceAccess,
@@ -144,12 +146,7 @@ export function setupWebsocket(
       );
       if (folder && !/^[\w-]{36}$/.test(folder))
         throw new Error("Invalid lesson");
-      const room = rooms.get(match[1], folder);
-      if (!room) {
-        socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
-        socket.destroy();
-        return;
-      }
+      const workspaceId = match[1];
       const credentials = (req.headers["sec-websocket-protocol"] ?? "")
         .split(",")
         .map((value) => value.trim())
@@ -169,10 +166,10 @@ export function setupWebsocket(
         workspaceAccess(
           rooms.db,
           (hash, user) => accounts.sessionValid(hash, user),
-          room.workspaceId,
+          workspaceId,
           auth,
         );
-      const canEdit = () => access() !== "viewer";
+      const canEdit = () => canEditAccess(access());
       // Changes are attributed to the verified account, never to a self-entered name.
       const actor: Actor = session
         ? { kind: "user", id: session.user.id, name: session.user.displayName }
@@ -180,9 +177,22 @@ export function setupWebsocket(
       if (
         credentials.length &&
         (credentials.length !== 1 ||
-          !rooms.canEditHash(room.workspaceId, credentialHash))
+          !rooms.canEditHash(workspaceId, credentialHash))
       ) {
         socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+      // Checked before the lesson is loaded: a private workspace without a grant looks
+      // exactly like one that doesn't exist, and is never loaded into memory.
+      if (!canReadAccess(access())) {
+        socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+      const room = rooms.get(workspaceId, folder);
+      if (!room) {
+        socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
         socket.destroy();
         return;
       }
@@ -226,6 +236,10 @@ export function setupWebsocket(
               frames = 0;
             }
             if (++frames > 2000) throw new Error("Too many messages");
+            // Access is re-checked on every message: a socket that lost all access (general
+            // access made private, share removed) is closed even before it is revalidated.
+            if (!canReadAccess(access()))
+              throw new Error("Your access to this workspace changed. Refresh to continue.");
             const dec = decoding.createDecoder(new Uint8Array(raw as Buffer)),
               type = decoding.readVarUint(dec);
             // Standard y-websocket clients echo remote awareness states. Those are

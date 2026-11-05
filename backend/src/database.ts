@@ -98,6 +98,19 @@ export function openDatabase(path: string) {
   db.exec(
     "CREATE INDEX IF NOT EXISTS rooms_owner ON rooms(owner_id, updated_at DESC)",
   );
+  // General access (additive): 'link' lets anyone with the workspace link view it, as every
+  // workspace always has; 'private' limits it to the owner, shares and Edit Link holders.
+  // Existing rows get 'link', so their student links keep working; new workspaces start
+  // 'private' (rooms.create).
+  if (
+    !db
+      .prepare("PRAGMA table_info(rooms)")
+      .all()
+      .some((column) => column.name === "visibility")
+  )
+    db.exec(
+      "ALTER TABLE rooms ADD COLUMN visibility TEXT NOT NULL DEFAULT 'link' CHECK (visibility IN ('link','private'))",
+    );
   // Inline document images (additive). Original bytes in 256 KB chunks; deleting a
   // workspace removes its images.
   db.exec(`CREATE TABLE IF NOT EXISTS images (
@@ -121,6 +134,47 @@ export function openDatabase(path: string) {
       PRIMARY KEY (workspace_id, user_id)
     );
     CREATE INDEX IF NOT EXISTS shares_user ON workspace_shares(user_id, updated_at DESC);`);
+  // Teams (additive). Membership alone grants no workspace access: workspaces are shared
+  // with a team explicitly (workspace_team_shares, a later phase). Exactly one owner per
+  // team, enforced by the partial unique index. Invitations go to existing accounts only
+  // (emails are not verified, so an invitation to an unregistered address could be claimed
+  // by whoever registers it first); declining or cancelling deletes the row.
+  db.exec(`CREATE TABLE IF NOT EXISTS teams (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+      created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS team_members (
+      team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      role TEXT NOT NULL CHECK (role IN ('owner','admin','member')),
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+      PRIMARY KEY (team_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS team_members_user ON team_members(user_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS team_one_owner ON team_members(team_id) WHERE role='owner';
+    CREATE TABLE IF NOT EXISTS team_invitations (
+      id TEXT PRIMARY KEY,
+      team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      role TEXT NOT NULL CHECK (role IN ('admin','member')),
+      invited_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+      created_at INTEGER NOT NULL,
+      UNIQUE (team_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS team_invitations_user ON team_invitations(user_id, created_at DESC);`);
+  // Team shares (additive): a workspace explicitly shared with a team, as Viewer or Editor.
+  // Members get that role while they are members; removing the share, the member or the team
+  // removes it. No existing workspace is shared with any team.
+  db.exec(`CREATE TABLE IF NOT EXISTS workspace_team_shares (
+      workspace_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+      team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      role TEXT NOT NULL CHECK (role IN ('viewer','editor')),
+      created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+      PRIMARY KEY (workspace_id, team_id)
+    );
+    CREATE INDEX IF NOT EXISTS workspace_team_shares_team ON workspace_team_shares(team_id);`);
   // Activity attribution (additive, nullable): older rows stay unattributed. actor_kind is
   // 'user' for a signed-in account or 'link' for a private editor-link guest.
   const activityColumns = db.prepare("PRAGMA table_info(activity)").all();

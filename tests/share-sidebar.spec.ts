@@ -48,7 +48,7 @@ test("owner: Editors · Can edit sits below Students, masked, copyable again aft
   const dialog = page.getByRole("dialog");
   // Order and no duplicates: Students, then Editors, then People with access.
   const headings = await dialog.locator("h3").allTextContents();
-  expect(headings.map((h) => h.trim())).toEqual(["Students · View only", "Editors · Can edit", "People with access"]);
+  expect(headings.map((h) => h.trim())).toEqual(["Students · View only", "Editors · Can edit", "People with access", "Teams with access"]);
   await expect(dialog.getByText("Co-editor access")).toHaveCount(0);
   // Students section unchanged.
   await expect(dialog.getByLabel("Student link", { exact: true })).toHaveValue(page.url().split("?")[0]);
@@ -155,7 +155,7 @@ test("account editors manage the Edit Link and sharing like the owner; link gues
     await signUp(eve, "Eve Editor", eveEmail);
     await signUp(vera, "Vera Viewer", veraEmail);
     await signUp(owner, "Link Owner");
-    const url = await createWorkspace(owner, "Edit link permissions");
+    const url = await createWorkspace(owner, "Edit link permissions", { studentLink: true });
     const ownerId = await owner.evaluate(async () => (await (await fetch("/api/auth/me")).json()).user.id);
     for (const s of [{ email: edEmail, role: "editor" }, { email: veraEmail, role: "viewer" }])
       expect((await apiCall(owner, "/shares", "POST", s)).status).toBe(201);
@@ -170,7 +170,7 @@ test("account editors manage the Edit Link and sharing like the owner; link gues
     await expect(ed.getByLabel("Workspace access")).toContainText("Editing");
     await share(ed);
     const headings = await ed.getByRole("dialog").locator("h3").allTextContents();
-    expect(headings.map((h) => h.trim())).toEqual(["Students · View only", "Editors · Can edit", "People with access"]);
+    expect(headings.map((h) => h.trim())).toEqual(["Students · View only", "Editors · Can edit", "People with access", "Teams with access"]);
     await expect(editors(ed).getByLabel("Edit link", { exact: true })).toHaveValue(ownerLink);
     await expect(editors(ed).getByLabel("Edit link", { exact: true })).toHaveAttribute("type", "password");
     await expect(editors(ed).getByRole("button", { name: "Create Edit Link", exact: true })).toHaveCount(0);
@@ -384,7 +384,7 @@ test("splitter: touch drag on a tablet; hidden for viewers and on phones", async
   try {
     const page = await context.newPage();
     await signUp(page, "Touch Split");
-    const url = await createWorkspace(page, "Touch split");
+    const url = await createWorkspace(page, "Touch split", { studentLink: true });
     await settled(page);
     const before = (await heights(page)).people;
     const box = (await page.getByRole("separator", { name: "Resize Connected panel" }).boundingBox())!;

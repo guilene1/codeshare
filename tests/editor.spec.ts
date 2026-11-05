@@ -64,7 +64,7 @@ test("line numbers show in every file type, both themes, while scrolling, and fo
   viewer.on("pageerror", (e) => errors.push(e.message));
   try {
     await signUp(owner, "Instructor");
-    const url = await createWorkspace(owner, "Line numbers");
+    const url = await createWorkspace(owner, "Line numbers", { studentLink: true });
     const files: Array<[string, string]> = [
       ["notes.txt", "First note\nSecond note\nThird note"],
       ["lesson.md", "# Lesson\n\nSome text\n\n```bash\nls\n```"],
@@ -183,7 +183,7 @@ test("students' read-only Preview shows live line numbers aligned with wrapped t
     });
   try {
     await signUp(owner, "Instructor");
-    const url = await createWorkspace(owner, "Numbered preview");
+    const url = await createWorkspace(owner, "Numbered preview", { studentLink: true });
     const longLine =
       "This sentence is deliberately long so that it wraps across several rows in the student's preview, " +
       "yet it is a single source line and must keep exactly one line number beside its first row. ".repeat(3);

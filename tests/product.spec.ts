@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { chooseDocumentView, signIn, signUp } from "./helpers";
+import { allowStudentLink, chooseDocumentView, signIn, signUp } from "./helpers";
 
 test("instructor's account dashboard follows them across devices, previews safe live notes and turns an exact selection into an inline lesson block", async ({
   browser,
@@ -37,6 +37,8 @@ test("instructor's account dashboard follows them across devices, previews safe 
       .getByRole("button", { name: "Create Workspace", exact: true })
       .click();
     await expect(owner.locator(".status-bar")).toContainText("Connected");
+    // New workspaces are Restricted: let students open the link without signing in.
+    await allowStudentLink(owner);
     const publicUrl = owner.url();
     expect(publicUrl).not.toContain("/edit/");
     // Three template files exist; only the first is opened as a tab.

@@ -52,7 +52,7 @@ test("Owners and Editors see live presence and attributed activity; Viewers see 
     await signUp(ed, "Ed Editor", edEmail);
     await signUp(vera, "Vera Viewer", veraEmail);
     await signUp(owner, "Olivia Owner");
-    const url = await createWorkspace(owner, "Presence lab");
+    const url = await createWorkspace(owner, "Presence lab", { studentLink: true });
     for (const share of [
       { email: edEmail, role: "editor" },
       { email: veraEmail, role: "viewer" },

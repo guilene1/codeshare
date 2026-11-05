@@ -38,6 +38,7 @@ import {
 } from "../markdown";
 import CodeBlockDialog from "./CodeBlockDialog";
 import ImageViewer from "./ImageViewer";
+import { useImageSrc } from "../imageSrc";
 import { imagesIn, type FoundImages } from "../documentImages";
 import { findLinks } from "../links";
 import HighlightedLines, { languageAccent } from "./HighlightedCode";
@@ -209,6 +210,8 @@ function DocImage({
   const [dragWidth, setDragWidth] = useState<number | null>(null);
   const figure = useRef<HTMLElement>(null);
   const width = dragWidth ?? segment.width;
+  // The plain URL, or (Edit Link guests in a Restricted workspace) a copy fetched with the link.
+  const shown = useImageSrc(segment.src);
   if (!workspaceImage(segment.src))
     return (
       <p className="pv-line doc-image-missing" data-line={line}>
@@ -235,8 +238,8 @@ function DocImage({
           onClick={() => setOpen(true)}
           style={width ? { width } : undefined}
         >
-          <img
-            src={attempt ? `${segment.src}?retry=${attempt}` : segment.src}
+          {shown && <img
+            src={attempt ? `${shown}?retry=${attempt}` : shown}
             alt={segment.alt}
             loading="lazy"
             decoding="async"
@@ -245,7 +248,7 @@ function DocImage({
               if (attempt >= 3) setFailed(true);
               else retry.current = setTimeout(() => setAttempt((n) => n + 1), (attempt + 1) * 2000 + Math.random() * 1000);
             }}
-          />
+          />}
         </button>
       )}
       {onResize && !failed && (
@@ -284,7 +287,7 @@ function DocImage({
       )}
       {open && (
         <ImageViewer
-          src={segment.src}
+          src={shown ?? segment.src}
           alt={segment.alt}
           canOpenOriginal={canOpenOriginal}
           onClose={() => setOpen(false)}

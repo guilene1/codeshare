@@ -83,7 +83,7 @@ test("sharing: Viewer and Editor accounts, Shared with Me, view-only controls, a
     );
 
     await signUp(owner, "Olivia Owner");
-    const url = await createWorkspace(owner, "Shared Kubernetes lab");
+    const url = await createWorkspace(owner, "Shared Kubernetes lab", { studentLink: true });
     expect(await createLesson(owner)).toBe(201);
     await openLesson(owner);
 

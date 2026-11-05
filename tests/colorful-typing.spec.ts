@@ -52,7 +52,7 @@ test("documents are colourful in the editor; the text, code files and collaborat
   try {
     const owner = await ownerContext.newPage();
     await signUp(owner, "Colour Owner");
-    const url = await createWorkspace(owner, "Colourful notes");
+    const url = await createWorkspace(owner, "Colourful notes", { studentLink: true });
     const md = await api(owner, "/documents", "POST", { filename: "lesson.md", language: "markdown", content: lesson });
     const txt = await api(owner, "/documents", "POST", { filename: "notes.txt", language: "plaintext", content: notes });
     expect([md.status, txt.status]).toEqual([201, 201]);

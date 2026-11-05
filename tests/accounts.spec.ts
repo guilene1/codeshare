@@ -99,7 +99,7 @@ test("users cannot see or change each other's workspaces; public links stay view
     bob = await b.newPage();
   try {
     await signUp(alice, "Alice");
-    const url = await createWorkspace(alice, "Alice private course");
+    const url = await createWorkspace(alice, "Alice private course", { studentLink: true });
     const id = url.split("/").pop()!;
     await signUp(bob, "Bob");
     await expect(bob.getByText("Your workspace starts here.")).toBeVisible();

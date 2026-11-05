@@ -54,7 +54,7 @@ test("large documents: REST creation, content API, conflicts, permissions and We
     // still goes through HTTP or the WebSocket with a private editor link, like Claude Code.
     const workspace = (a: App = app) => {
       const token = randomBytes(32).toString("base64url");
-      const room = a.rooms.create("Upload test", "markdown", hashEditorToken(token), undefined, "", owner.user.id);
+      const room = a.rooms.create("Upload test", "markdown", hashEditorToken(token), undefined, "", owner.user.id, undefined, "link");
       return { id: room.workspaceId, token };
     };
     const call = (path: string, method = "GET", body?: unknown, headers: Record<string, string> = {}) =>
@@ -291,7 +291,7 @@ test("review: isolation between workspaces, refused writes change nothing, no ex
     const vera = await signUp(base, origin, "Vera Viewer");
     const workspace = () => {
       const token = randomBytes(32).toString("base64url");
-      const room = app.rooms.create("Review", "markdown", hashEditorToken(token), undefined, "", owner.user.id);
+      const room = app.rooms.create("Review", "markdown", hashEditorToken(token), undefined, "", owner.user.id, undefined, "link");
       return { id: room.workspaceId, token };
     };
     const call = (path: string, method = "GET", body?: unknown, headers: Record<string, string> = {}) =>

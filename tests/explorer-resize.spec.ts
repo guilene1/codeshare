@@ -174,7 +174,7 @@ test("editors, registered viewers and anonymous viewers can all resize the Explo
     await signUp(ed, "Ed Editor", edEmail);
     await signUp(vera, "Vera Viewer", veraEmail);
     await signUp(owner, "Olivia Owner");
-    const url = await createWorkspace(owner, "Shared resizable explorer");
+    const url = await createWorkspace(owner, "Shared resizable explorer", { studentLink: true });
     await addFile(owner, LONG_NAME);
     const statuses = await owner.evaluate(
       async (shares) => {
@@ -290,7 +290,7 @@ test("Connected section's anonymous viewer count matches its section and stays i
   browser,
 }) => {
   await signUp(page, "Connected Owner");
-  const url = await createWorkspace(page, "Connected section");
+  const url = await createWorkspace(page, "Connected section", { studentLink: true });
   const count = page.locator(".sidebar-people .anonymous-viewers");
   await expect(count).toHaveText("0 anonymous viewers");
   // The count still updates live when a student opens the read-only link.

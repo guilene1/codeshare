@@ -62,7 +62,7 @@ test("owners share workspaces with registered users as Viewer or Editor; anonymo
     const vera = await signUp(base, origin, "Vera Viewer");
     const ed = await signUp(base, origin, "Ed Editor");
     const outsider = await signUp(base, origin, "Oscar Outsider");
-    const created = await call("/rooms", "POST", { name: "Shared course", language: "shell" }, owner.headers);
+    const created = await call("/rooms", "POST", { name: "Shared course", language: "shell", visibility: "link" }, owner.headers);
     const { id } = (await created.json()) as { id: string };
     const info = async (headers: Record<string, string> = {}) =>
       (await (await call("/rooms/" + id, "GET", undefined, headers)).json()) as Record<string, unknown>;
@@ -230,7 +230,7 @@ test("signed-in editors manage the Edit Link and sharing like the owner; the own
     const eve = await signUp(base, origin, "Eve Editor");
     const vera = await signUp(base, origin, "Vera Viewer");
     const outsider = await signUp(base, origin, "Oscar Outsider");
-    const { id } = (await (await call("/rooms", "POST", { name: "Team course", language: "shell" }, owner.headers)).json()) as {
+    const { id } = (await (await call("/rooms", "POST", { name: "Team course", language: "shell", visibility: "link" }, owner.headers)).json()) as {
       id: string;
     };
     const info = async (headers: Record<string, string> = {}) =>

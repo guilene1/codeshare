@@ -28,7 +28,9 @@ export async function signIn(page: Page, email: string, password = PASSWORD) {
 export async function createWorkspace(
   page: Page,
   name: string,
-  options: { template?: string; description?: string } = {},
+  // studentLink: turn on "Anyone with the link can view" (new workspaces start Restricted),
+  // through the Share popup as a teacher would, so students can open the link.
+  options: { template?: string; description?: string; studentLink?: boolean } = {},
 ) {
   if (!/\/workspaces$/.test(page.url())) await page.goto("/workspaces");
   await page
@@ -60,7 +62,20 @@ export async function createWorkspace(
   await expect(page.getByLabel("Workspace access")).toContainText("Editing");
   await expect(page.locator(".status-bar")).toContainText("Connected");
   expect(page.url()).not.toContain("/edit/");
+  if (options.studentLink) await allowStudentLink(page);
   return page.url().split("?")[0];
+}
+
+// Sets General access to "Anyone with the link can view" from the Share popup.
+export async function allowStudentLink(page: Page) {
+  await page.getByRole("button", { name: "Share", exact: true }).click();
+  const access = page.getByRole("dialog").getByLabel("General access");
+  const saved = page.waitForResponse((r) => r.request().method() === "PUT" && r.url().endsWith("/visibility"));
+  await access.selectOption("link");
+  expect((await saved).status()).toBe(200);
+  await expect(access).toHaveValue("link");
+  await page.getByRole("button", { name: "Close dialog" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
 }
 
 // Documents (Markdown, Plain Text) open in Preview. Tests that type into the source switch

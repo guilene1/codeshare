@@ -36,7 +36,7 @@ test("lesson documents show inline code blocks with Copy; instructors insert, ed
   owner.on("dialog", (d) => void d.accept());
   try {
     await signUp(owner, "Instructor");
-    const url = await createWorkspace(owner, "Terraform Introduction");
+    const url = await createWorkspace(owner, "Terraform Introduction", { studentLink: true });
     await owner.getByRole("button", { name: "New file", exact: true }).first().click();
     await owner.getByLabel("Filename", { exact: true }).fill("lesson.md");
     await owner
@@ -208,7 +208,7 @@ test("legacy standalone snippets move into a lesson document only when the instr
     viewer = await student.newPage();
   try {
     await signUp(owner, "Instructor");
-    const url = await createWorkspace(owner, "Legacy course");
+    const url = await createWorkspace(owner, "Legacy course", { studentLink: true });
     // Seed v1-style standalone snippets through the still-supported blocks API.
     await owner.evaluate(async (id) => {
       const { csrfToken } = await (await fetch("/api/auth/me")).json();
@@ -265,7 +265,7 @@ test("file tabs close and reopen like an editor without changing shared files", 
   viewer.on("pageerror", (e) => errors.push(e.message));
   try {
     await signUp(owner, "Instructor");
-    const url = await createWorkspace(owner, "Tabs course");
+    const url = await createWorkspace(owner, "Tabs course", { studentLink: true });
     const tab = (page: Page, name: string) => page.getByRole("tab", { name, exact: true });
     await openFromExplorer(owner, "variables.tf");
     await openFromExplorer(owner, "outputs.tf");
@@ -331,7 +331,7 @@ test("typing ``` in a Markdown lesson creates a ChatGPT-style code block with it
   viewer.on("pageerror", (e) => errors.push(e.message));
   try {
     await signUp(owner, "Instructor");
-    const url = await createWorkspace(owner, "Backtick lesson");
+    const url = await createWorkspace(owner, "Backtick lesson", { studentLink: true });
     await owner.getByRole("button", { name: "New file", exact: true }).first().click();
     await owner.getByLabel("Filename", { exact: true }).fill("lesson.md");
     await owner
@@ -428,7 +428,7 @@ test("Plain Text documents: typing ``` creates interactive code blocks with Copy
     );
   try {
     await signUp(owner, "Instructor");
-    const url = await createWorkspace(owner, "Plain text notes");
+    const url = await createWorkspace(owner, "Plain text notes", { studentLink: true });
     // 1. A Plain Text document (no Markdown, no .md extension).
     await owner.getByRole("button", { name: "New file", exact: true }).first().click();
     await owner.getByLabel("Filename", { exact: true }).fill("notes.txt");

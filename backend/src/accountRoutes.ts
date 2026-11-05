@@ -287,7 +287,7 @@ export function accountRoutes(
     res.json({
       workspaces: rooms.db
         .prepare(
-          "SELECT id,name,description,created_at,updated_at,editor_token_hash IS NOT NULL AS has_editor_link FROM rooms WHERE owner_id=? ORDER BY updated_at DESC",
+          "SELECT id,name,description,created_at,updated_at,visibility,editor_token_hash IS NOT NULL AS has_editor_link FROM rooms WHERE owner_id=? ORDER BY updated_at DESC",
         )
         .all(session.user.id)
         .map((row) => ({
@@ -296,7 +296,11 @@ export function accountRoutes(
           description: row.description,
           created_at: row.created_at,
           updated_at: row.updated_at,
+          visibility: row.visibility,
           hasEditorLink: !!row.has_editor_link,
+          // For the card's Shared and Team indicators (counts only, never names).
+          shareCount: count("SELECT COUNT(*) AS n FROM workspace_shares WHERE workspace_id=?", row.id as string),
+          teamShareCount: count("SELECT COUNT(*) AS n FROM workspace_team_shares WHERE workspace_id=?", row.id as string),
           files: count("SELECT COUNT(*) AS n FROM documents WHERE room_id=?", row.id as string),
           folders: count("SELECT COUNT(*) AS n FROM folders WHERE workspace_id=?", row.id as string),
           activity: rooms.db
@@ -336,9 +340,10 @@ export function accountRoutes(
       .prepare("DELETE FROM workspace_shares WHERE workspace_id=? AND user_id=?")
       .run(workspaceId, session.user.id).changes;
     if (removed) {
-      rooms.disconnect(
-        (auth) =>
-          auth.userId === session.user.id && auth.workspaceId === workspaceId,
+      // Only sessions that lost access close (a team share may still grant the same).
+      rooms.revalidate(
+        workspaceId,
+        (hash, user) => accounts.sessionValid(hash, user),
         "You left this shared workspace",
       );
       rooms.record(workspaceId, "share.left", session.user.displayName, {

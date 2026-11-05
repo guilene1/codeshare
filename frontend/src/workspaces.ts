@@ -74,6 +74,10 @@ export type OwnedWorkspace = {
   created_at: number;
   updated_at: number;
   hasEditorLink: boolean;
+  // General access and sharing, for the card's Private / Link / Shared / Team indicators.
+  visibility: "link" | "private";
+  shareCount: number;
+  teamShareCount: number;
   files: number;
   folders: number;
   activity: Activity[];
@@ -152,6 +156,27 @@ export function activityText(item: Activity) {
     "share.changed": "Changed access for",
     "share.removed": "Removed access for",
     "share.left": "Left shared workspace",
+    "access.changed": "General access",
+    "team.shared": "Shared with team",
+    "team.changed": "Changed team access for",
+    "team.removed": "Removed team access for",
   };
   return `${verbs[item.action] ?? "Updated workspace structure"} · ${item.label}`;
 }
+// Teams (from /api/teams): the signed-in user's teams and their role in each.
+export type TeamRole = "owner" | "admin" | "member";
+export type TeamSummary = {
+  id: string;
+  name: string;
+  description: string;
+  role: TeamRole;
+  memberCount: number;
+  createdAt: number;
+  updatedAt: number;
+};
+export type TeamMember = { userId: string; displayName: string; email?: string; role: TeamRole; joinedAt: number; you: boolean };
+export type TeamInvitation = { id: string; userId: string; displayName: string; email: string; role: "admin" | "member"; invitedAt: number; invitedBy: string | null };
+export type TeamDetail = TeamSummary & { members: TeamMember[]; invitations?: TeamInvitation[] };
+export type MyInvitation = { id: string; teamId: string; teamName: string; teamDescription: string; role: "admin" | "member"; invitedAt: number; invitedBy: string | null };
+export type TeamWorkspace = { id: string; name: string; description: string; updatedAt: number; role: ShareRole; sharedAt: number; ownerName: string | null };
+export const teamRoleLabel = (role: TeamRole) => (role === "owner" ? "Owner" : role === "admin" ? "Admin" : "Member");

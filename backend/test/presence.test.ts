@@ -82,7 +82,7 @@ test("presence and activity reach Owners and Editors only, with verified attribu
     const ed = await signUp(base, origin, "Ed Editor");
     const vera = await signUp(base, origin, "Vera Viewer");
     const { id } = (await (
-      await call("/rooms", "POST", { name: "Presence course", language: "yaml" }, owner.headers)
+      await call("/rooms", "POST", { name: "Presence course", language: "yaml", visibility: "link" }, owner.headers)
     ).json()) as { id: string };
     for (const [person, role] of [
       [ed, "editor"],
@@ -285,7 +285,7 @@ test("an untracked socket is denied presence, activity and viewers' awareness by
       await fetch(base + "/api/rooms", {
         method: "POST",
         headers: { ...owner.headers, "content-type": "application/json" },
-        body: JSON.stringify({ name: "Untracked check", language: "yaml" }),
+        body: JSON.stringify({ name: "Untracked check", language: "yaml", visibility: "link" }),
       })
     ).json()) as { id: string };
     const ownerTab = connect(id, { cookie: owner.cookie }, "Olivia Owner");
@@ -379,7 +379,7 @@ test("a viewer receives its own presence echo (keep-alive) but never another vie
       await fetch(base + "/api/rooms", {
         method: "POST",
         headers: { ...owner.headers, "content-type": "application/json" },
-        body: JSON.stringify({ name: "Echo", language: "yaml" }),
+        body: JSON.stringify({ name: "Echo", language: "yaml", visibility: "link" }),
       })
     ).json()) as { id: string };
     // Two anonymous viewers and no editor: nothing else would ever reach them.

@@ -15,7 +15,7 @@ import {
 import Modal from "./Modal";
 import { api } from "../lib";
 import { BRAND } from "../brand";
-import type { ShareRole } from "../workspaces";
+import type { ShareRole, TeamSummary } from "../workspaces";
 
 type Share = {
   userId: string;
@@ -196,6 +196,154 @@ function PeopleAccess({
     </section>
   );
 }
+
+type TeamShare = { teamId: string; name: string; role: ShareRole; memberCount: number; createdAt: number };
+
+// Teams with access: the workspace owner shares with a team they belong to, as Viewer or
+// Editor; its members get that access while they're in the team. People with direct
+// Editor access see the teams but can't change them (the server enforces the same).
+function TeamAccess({ id, owner }: { id: string; owner: boolean }) {
+  const [shares, setShares] = useState<TeamShare[] | null>(null);
+  const [teams, setTeams] = useState<TeamSummary[] | null>(null);
+  const [teamId, setTeamId] = useState("");
+  const [role, setRole] = useState<ShareRole>("viewer");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [removing, setRemoving] = useState<TeamShare | null>(null);
+  useEffect(() => {
+    api<{ teamShares: TeamShare[] }>(`/rooms/${id}/team-shares`)
+      .then((result) => setShares(result.teamShares))
+      .catch((e) => setError((e as Error).message));
+    if (owner)
+      api<{ teams: TeamSummary[] }>("/teams")
+        .then((result) => setTeams(result.teams))
+        .catch((e) => setError((e as Error).message));
+  }, [id, owner]);
+  async function change(run: () => Promise<{ teamShares: TeamShare[] }>) {
+    setBusy(true);
+    setError("");
+    try {
+      setShares((await run()).teamShares);
+      return true;
+    } catch (e) {
+      setError((e as Error).message);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+  const available = (teams ?? []).filter((t) => !(shares ?? []).some((s) => s.teamId === t.id));
+  async function add(event: FormEvent) {
+    event.preventDefault();
+    if (await change(() => api(`/rooms/${id}/team-shares`, "POST", { teamId, role }))) setTeamId("");
+  }
+  return (
+    <section className="access-share-section team-access" aria-label="Teams with access">
+      <h3>
+        <Users size={16} />
+        Teams with access
+      </h3>
+      <p>
+        {owner
+          ? "Share with a team you belong to. Everyone in the team gets this access, and people who join later get it too."
+          : "Only the workspace owner can share it with teams."}
+      </p>
+      {owner &&
+        (teams === null ? null : !teams.length ? (
+          <p className="fine-print">
+            You're not in a team yet. <a href="/workspaces?view=teams">Create one in My Teams</a>.
+          </p>
+        ) : (
+          <form className="people-add" onSubmit={(e) => void add(e)}>
+            <select aria-label="Team" value={teamId} onChange={(e) => setTeamId(e.target.value)} disabled={!available.length}>
+              <option value="">{available.length ? "Choose a team…" : "All your teams have access"}</option>
+              {available.map((team) => (
+                <option key={team.id} value={team.id}>
+                  {team.name}
+                </option>
+              ))}
+            </select>
+            <select aria-label="Team permission" value={role} onChange={(e) => setRole(e.target.value as ShareRole)}>
+              <option value="viewer">Viewer</option>
+              <option value="editor">Editor</option>
+            </select>
+            <button className="button primary" disabled={busy || !teamId}>
+              {busy && <Loader2 size={15} className="spin" />} Share
+            </button>
+          </form>
+        ))}
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+      {shares === null ? (
+        !error && (
+          <p className="fine-print">
+            <Loader2 size={14} className="spin" /> Loading…
+          </p>
+        )
+      ) : !shares.length ? (
+        <p className="fine-print">Not shared with any teams yet.</p>
+      ) : (
+        <ul className="people-list" aria-label="Teams">
+          {shares.map((share) => (
+            <li key={share.teamId}>
+              <span>
+                <strong>{share.name}</strong>
+                <small>
+                  {share.memberCount} member{share.memberCount === 1 ? "" : "s"}
+                </small>
+              </span>
+              {owner ? (
+                <>
+                  <select
+                    aria-label={`Permission for ${share.name}`}
+                    value={share.role}
+                    disabled={busy}
+                    onChange={(e) => void change(() => api(`/rooms/${id}/team-shares/${share.teamId}`, "PATCH", { role: e.target.value }))}
+                  >
+                    <option value="viewer">Viewer</option>
+                    <option value="editor">Editor</option>
+                  </select>
+                  <button className="icon-button" aria-label={`Remove ${share.name}`} title="Remove team access" disabled={busy} onClick={() => setRemoving(share)}>
+                    <X size={15} />
+                  </button>
+                </>
+              ) : (
+                <span className={"role-badge " + share.role}>{share.role === "editor" ? "Editor" : "Viewer"}</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {removing && (
+        <div className="share-confirm" role="group" aria-label="Confirm team access removal">
+          <p>
+            Remove {removing.name}'s access? Its members lose access right away, unless they have another way in (their own
+            share, the Edit Link or link access).
+          </p>
+          <div className="dialog-actions">
+            <button className="button secondary" disabled={busy} onClick={() => setRemoving(null)}>
+              Cancel
+            </button>
+            <button
+              className="button danger"
+              disabled={busy}
+              onClick={() => {
+                const share = removing;
+                setRemoving(null);
+                void change(() => api(`/rooms/${id}/team-shares/${share.teamId}`, "DELETE"));
+              }}
+            >
+              {busy && <Loader2 size={15} className="spin" />} Remove team access
+            </button>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
 export default function AccessShare({
   id,
   name,
@@ -204,6 +352,8 @@ export default function AccessShare({
   canShare,
   selfId,
   hasEditorLink,
+  visibility,
+  onVisibilityChange,
   folderId,
   freshToken,
   onFreshToken,
@@ -220,6 +370,9 @@ export default function AccessShare({
   canShare: boolean;
   selfId?: string;
   hasEditorLink?: boolean;
+  // General access: "link" lets students open the student link without signing in.
+  visibility: "link" | "private";
+  onVisibilityChange: (visibility: "link" | "private") => void;
   folderId?: string | null;
   // A link created during this page session (memory only, never browser storage).
   freshToken: string;
@@ -233,6 +386,20 @@ export default function AccessShare({
   const [confirm, setConfirm] = useState<"replace" | "revoke" | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [accessBusy, setAccessBusy] = useState(false);
+  const [accessError, setAccessError] = useState("");
+  async function changeVisibility(next: "link" | "private") {
+    setAccessBusy(true);
+    setAccessError("");
+    try {
+      const result = await api<{ visibility: "link" | "private" }>(`/rooms/${id}/visibility`, "PUT", { visibility: next });
+      onVisibilityChange(result.visibility);
+    } catch (e) {
+      setAccessError((e as Error).message);
+    } finally {
+      setAccessBusy(false);
+    }
+  }
   // The active link as stored on the server: undefined while loading, "" when it can't be
   // shown (links created before links were stored, or none). Held in memory only.
   const [storedToken, setStoredToken] = useState<string | undefined>(
@@ -287,15 +454,41 @@ export default function AccessShare({
   return (
     <Modal title={"Share “" + name + "”"} onClose={onClose}>
       <p className="modal-description">
-        Bring your class into the workspace. Students open the link right away,
-        with no account or sign-in.
+        {visibility === "link"
+          ? "Bring your class into the workspace. Students open the link right away, with no account or sign-in."
+          : "Bring your class into the workspace. Allow anyone with the link to view, and students open it right away with no account or sign-in."}
       </p>
       <section className="access-share-section">
         <h3>
           <Users size={16} />
           Students · View only
         </h3>
-        <p>Anyone with this link can follow along live. Share it with your whole class.</p>
+        {canShare ? (
+          <label className="field general-access">
+            General access
+            <select
+              aria-label="General access"
+              value={visibility}
+              disabled={accessBusy}
+              onChange={(e) => void changeVisibility(e.target.value as "link" | "private")}
+            >
+              <option value="private">Restricted: only people with access</option>
+              <option value="link">Anyone with the link can view</option>
+            </select>
+          </label>
+        ) : null}
+        {accessError && (
+          <p className="error" role="alert">
+            {accessError}
+          </p>
+        )}
+        <p>
+          {visibility === "link"
+            ? "Anyone with this link can follow along live. Share it with your whole class."
+            : canShare
+              ? "Restricted: only you and people you share with can open this link. Choose “Anyone with the link can view” so students can join without signing in."
+              : "Restricted: only people with access can open this link."}
+        </p>
         <label className="field">
           Student link
           <div className="copy-field">
@@ -452,6 +645,7 @@ export default function AccessShare({
         </section>
       )}
       {canShare && <PeopleAccess id={id} selfId={selfId} onAccessChange={onAccessChange} />}
+      {canShare && <TeamAccess id={id} owner={owner} />}
     </Modal>
   );
 }

@@ -59,7 +59,7 @@ test("workspaces are owned: other users and anonymous viewers are read-only over
     assert.equal((await call("/rooms", "POST", { name: "Anonymous" })).status, 401);
     const alice = await signUp(base, origin, "Alice Instructor");
     const bob = await signUp(base, origin, "Bob Other");
-    const created = await call("/rooms", "POST", { name: "Alice course", language: "shell" }, alice.headers);
+    const created = await call("/rooms", "POST", { name: "Alice course", language: "shell", visibility: "link" }, alice.headers);
     assert.equal(created.status, 201);
     const { id } = (await created.json()) as { id: string };
     const info = async (headers: Record<string, string> = {}) =>
@@ -192,10 +192,16 @@ test("legacy workspaces keep their editor links and can be claimed exactly once"
     });
   try {
     const token = randomBytes(32).toString("base64url");
+    // A v1 workspace: unowned, editable only through its private link, link-visible.
     const legacy = app.rooms.create(
       "v1 course",
       "hcl",
       createHash("sha256").update(token).digest("hex"),
+      undefined,
+      "",
+      null,
+      undefined,
+      "link",
     );
     const bearer = { authorization: "Bearer " + token };
     const room = await (await call("/rooms/" + legacy.workspaceId, "GET", undefined, bearer)).json();
@@ -246,7 +252,7 @@ test("standalone snippets migrate into a Markdown lesson only on request, withou
     });
   try {
     const token = randomBytes(32).toString("base64url");
-    const legacy = app.rooms.create("Snippets", "hcl", createHash("sha256").update(token).digest("hex"));
+    const legacy = app.rooms.create("Snippets", "hcl", createHash("sha256").update(token).digest("hex"), undefined, "", null, undefined, "link");
     createBlock(legacy, { title: "Initialize", language: "shell", content: "terraform init" });
     createBlock(legacy, { title: "Fence inside", language: "markdown", content: "```bash\nls\n```" });
     createBlock(legacy, { title: "", language: "hcl", content: 'provider "aws" {}\n' });

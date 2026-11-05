@@ -68,6 +68,7 @@ import {
   SignUp,
 } from "./components/AuthPages";
 import { AuthContext, loadSession, useAuth, type AuthState, type User } from "./auth";
+import { setImageCredential } from "./imageSrc";
 import { plural, type Activity, type PresenceSummary } from "./workspaces";
 import { fence, imageMarkdown, insertBlock, isDocumentLanguage } from "./markdown";
 import { BRAND, Logo, LogoMark, TAGLINE } from "./brand";
@@ -106,6 +107,8 @@ type RoomInfo = {
   claimable?: boolean;
   canShare?: boolean;
   hasEditorLink?: boolean;
+  // General access: "link" (anyone with the link can view) or "private".
+  visibility?: "link" | "private";
 };
 type Person = {
   id: number;
@@ -722,6 +725,11 @@ function Workspace({
   const anonymousViewers = plural(presence?.anonymous ?? 0, "anonymous viewer");
   // Never carry a page-session Edit Link over to another workspace.
   useEffect(() => setFreshEditLink(""), [id]);
+  // An Edit Link guest in a Restricted workspace loads its images with the link (an <img>
+  // request can't carry it); everyone else keeps plain image requests. Set while rendering,
+  // before the document's images render, and cleared when leaving the workspace.
+  setImageCredential(credential && room?.visibility === "private" ? credential : undefined);
+  useEffect(() => () => setImageCredential(undefined), []);
   // Editors get the views bar (activity, lesson name, view switch); viewers only need it to
   // reach unmigrated legacy snippets.
   const showViews = isEditor || (!!blocks.length && !migrated);
@@ -1517,6 +1525,10 @@ function Workspace({
       </div>
     );
   const connected = status === "connected" && synced;
+  // The open file's views are tied to the shared document its text belongs to: a reconnect
+  // with new rights (e.g. Viewer upgraded to Editor) brings a new document, and once its text
+  // arrives they remount on it instead of staying bound to the old copy.
+  const fileKey = current ? `${current.id}:${current.content.doc?.clientID ?? 0}` : "";
   const connectionLabel = connected
     ? isEditor
       ? "Connected"
@@ -1597,6 +1609,8 @@ function Workspace({
               </button>
               <button
                 className="button primary share-button"
+                // Named for screen readers on phones too, where the visible text is hidden.
+                aria-label="Share"
                 onClick={() => setDialog("share")}
               >
                 <Share2 size={15} />
@@ -2133,7 +2147,7 @@ function Workspace({
                 isDocumentLanguage(current.language) &&
                 markdownMode === "preview" ? (
                   <MarkdownPreview
-                    key={current.id}
+                    key={fileKey}
                     file={current}
                     fontSize={settings.fontSize}
                     canEdit={isEditor && connected}
@@ -2153,7 +2167,7 @@ function Workspace({
                         isEditor ? createBlockFromSelection : undefined
                       }
                       onImages={isEditor && connected ? addImages : undefined}
-                      key={current.id}
+                      key={fileKey}
                       file={current}
                       readOnly={!isEditor}
                       provider={provider}
@@ -2167,7 +2181,7 @@ function Workspace({
                     {isDocumentLanguage(current.language) &&
                       markdownMode === "split" && (
                         <MarkdownPreview
-                          key={"preview-" + current.id}
+                          key={"preview-" + fileKey}
                           file={current}
                           fontSize={settings.fontSize}
                           canEdit={isEditor && connected}
@@ -2351,6 +2365,10 @@ function Workspace({
           canShare={!!room.canShare}
           selfId={user?.id}
           hasEditorLink={room.hasEditorLink}
+          visibility={room.visibility ?? "link"}
+          onVisibilityChange={(visibility) =>
+            setRoom((previous) => (previous ? { ...previous, visibility } : previous))
+          }
           freshToken={freshEditLink}
           onFreshToken={setFreshEditLink}
           copy={copy}

@@ -143,7 +143,7 @@ test("API updates appear live in an open editor; stale API writes are refused; r
 test("opening a single-line file sends no edit, for editors and anonymous viewers", async ({ page, browser }) => {
   test.setTimeout(120_000);
   await signUp(page, "Open Owner");
-  const url = await createWorkspace(page, "Open only");
+  const url = await createWorkspace(page, "Open only", { studentLink: true });
   const workspace = url.split("/").pop()!;
   const created = await api(page, "/documents", "POST", { filename: "one-line.py", language: "python", content: 'print("hello")' });
   expect(created.status).toBe(201);

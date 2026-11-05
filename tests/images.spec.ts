@@ -138,7 +138,7 @@ test("images: paste diagrams with Ctrl+V, full-width original resolution, zoom v
   viewer.on("pageerror", (e) => errors.push(e.message));
   try {
     await signUp(owner, "Instructor");
-    const url = await createWorkspace(owner, "Kubernetes images");
+    const url = await createWorkspace(owner, "Kubernetes images", { studentLink: true });
     const lesson = [
       "# Kubernetes architecture",
       "",

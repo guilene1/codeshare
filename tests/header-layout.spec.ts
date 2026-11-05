@@ -52,7 +52,7 @@ async function checkHeader(page: Page, role: "viewer" | "owner", width: number) 
 test("header: branding left, connection/access/settings/theme far right, for viewers and owners at every width", async ({ page, browser }) => {
   test.setTimeout(150_000);
   await signUp(page, "Header Owner");
-  const url = await createWorkspace(page, "Header layout");
+  const url = await createWorkspace(page, "Header layout", { studentLink: true });
   const context = await browser.newContext();
   try {
     const viewer = await context.newPage();
@@ -101,7 +101,7 @@ test("header: branding left, connection/access/settings/theme far right, for vie
 test("a viewer's header indicator shows the real state: Live, Reconnecting, then Live again", async ({ page, browser }) => {
   test.setTimeout(120_000);
   await signUp(page, "State Owner");
-  const url = await createWorkspace(page, "Connection state");
+  const url = await createWorkspace(page, "Connection state", { studentLink: true });
   const context = await browser.newContext();
   try {
     const viewer = await context.newPage();

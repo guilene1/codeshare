@@ -27,8 +27,11 @@ import { setupWebsocket } from "./websocket.js";
 import * as Y from "yjs";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import {
+  canEditAccess,
+  canReadAccess,
   hashEditorToken,
   isShareRole,
+  isVisibility,
   TOKEN_PATTERN,
   workspaceAccess,
 } from "./access.js";
@@ -43,6 +46,7 @@ import {
 import { accountRoutes, authLimits, type AuthLimits } from "./accountRoutes.js";
 import { migrateSnippets } from "./migrate.js";
 import { LinkVault } from "./linkVault.js";
+import { teamRoutes } from "./teamRoutes.js";
 import {
   createMailer,
   EmailOutbox,
@@ -257,6 +261,13 @@ export function createApp(
     ...authLimits(),
     ...options.authLimits,
   });
+  teamRoutes(app, rooms.db, (workspaceId) =>
+    rooms.revalidate(
+      workspaceId,
+      (hash, user) => accounts.sessionValid(hash, user),
+      "Your access to this workspace changed. Refresh to continue.",
+    ),
+  );
   app.post(
     "/api/rooms",
     rateLimit({
@@ -286,6 +297,10 @@ export function createApp(
           !Object.hasOwn(templates, req.body.template))
       )
         throw new Error("Choose a supported workspace template.");
+      // New workspaces are private unless the creator asks for link access.
+      const visibility = req.body.visibility ?? "private";
+      if (!isVisibility(visibility))
+        throw new Error("Choose who can open this workspace.");
       const room = rooms.create(
         name.trim(),
         language(req.body.language ?? "hcl"),
@@ -294,10 +309,14 @@ export function createApp(
         description.trim(),
         session.user.id,
         { kind: "user", id: session.user.id, name: session.user.displayName },
+        visibility,
       );
       res.status(201).json({ id: room.id, name: room.name });
     },
   );
+  // One message for "doesn't exist" and "private, no access", so they can't be told apart.
+  const notFound =
+    "Workspace not found. It may have been deleted, or it is private: sign in if it was shared with you.";
   app.use("/api/rooms/:roomId", (req, res, next) => {
     if (!/^[A-Za-z0-9_-]{16}$/.test(req.params.roomId)) {
       res
@@ -309,9 +328,7 @@ export function createApp(
     }
     const room = rooms.info(req.params.roomId);
     if (!room) {
-      res
-        .status(404)
-        .json({ error: "Workspace not found. It may have been deleted." });
+      res.status(404).json({ error: notFound });
       return;
     }
     room.touched = Date.now();
@@ -335,13 +352,20 @@ export function createApp(
       room.id as string,
       { userId: session?.user.id, sessionHash: session?.tokenHash, tokenHash },
     );
+    // No access at all (a private workspace and no grant): the same 404 as a workspace that
+    // doesn't exist, so neither its existence nor its name is revealed. This gate covers
+    // every /api/rooms/:roomId route (content, files, images, tree, blocks, sharing).
+    if (!canReadAccess(access)) {
+      res.status(404).json({ error: notFound });
+      return;
+    }
     res.locals.access = access;
     res.locals.linkValid = linkValid;
-    res.locals.canEdit = access !== "viewer";
+    res.locals.canEdit = canEditAccess(access);
     // Who a change is attributed to: the verified account, else a private-link guest.
     res.locals.actor = session
       ? { kind: "user", id: session.user.id, name: session.user.displayName }
-      : access !== "viewer"
+      : canEditAccess(access)
         ? { kind: "link" }
         : undefined;
     // Owners manage their workspace; unclaimed legacy workspaces keep v1 link management.
@@ -371,6 +395,7 @@ export function createApp(
       name: room.name,
       description: room.description,
       access: res.locals.access,
+      visibility: room.visibility,
       owned: !!room.owner_id,
       // A valid editor link for an unowned workspace can be claimed once.
       claimable: !room.owner_id && res.locals.linkValid,
@@ -496,10 +521,13 @@ export function createApp(
     }
     next();
   });
-  const dropLinkEditors = (previousHash: unknown) => {
+  // A replaced or revoked Edit Link closes the sessions that relied on it; anyone who still
+  // has the same access another way (an account share, a team) stays connected.
+  const dropLinkEditors = (workspaceId: string, previousHash: unknown) => {
     if (typeof previousHash === "string")
-      rooms.disconnect(
-        (auth) => auth.tokenHash === previousHash,
+      rooms.revalidate(
+        workspaceId,
+        (hash, user) => accounts.sessionValid(hash, user),
         "The private editor link was replaced or revoked",
       );
   };
@@ -523,7 +551,7 @@ export function createApp(
     rooms.db
       .prepare("UPDATE rooms SET editor_token_hash=?,editor_token_sealed=? WHERE id=?")
       .run(hashEditorToken(token), links.seal(id, token), id);
-    dropLinkEditors(previous);
+    dropLinkEditors(id, previous);
     rooms.record(id, previous ? "link.replaced" : "link.created", "Editor link", res.locals.actor);
     res.status(201).json({ token });
   });
@@ -535,9 +563,41 @@ export function createApp(
     rooms.db
       .prepare("UPDATE rooms SET editor_token_hash=NULL,editor_token_sealed=NULL WHERE id=?")
       .run(id);
-    dropLinkEditors(previous);
+    dropLinkEditors(id, previous);
     if (previous) rooms.record(id, "link.revoked", "Editor link", res.locals.actor);
     res.json({ ok: true });
+  });
+  // General access: 'link' (anyone with the workspace link can view, no sign-in) or
+  // 'private' (only the owner, shares and Edit Link holders). Managed like sharing.
+  app.put("/api/rooms/:roomId/visibility", (req, res) => {
+    if (!res.locals.canShare) {
+      res.status(403).json({
+        error: "Only the workspace owner and editors can change who can open this workspace.",
+      });
+      return;
+    }
+    const visibility = req.body?.visibility;
+    if (!isVisibility(visibility))
+      throw new Error("Choose who can open this workspace.");
+    const id = res.locals.workspace.id;
+    const changed = rooms.db
+      .prepare("UPDATE rooms SET visibility=? WHERE id=? AND visibility<>?")
+      .run(visibility, id, visibility).changes;
+    if (changed) {
+      // Link viewers lose access at once when it becomes private; others are unaffected.
+      rooms.revalidate(
+        id,
+        (hash, user) => accounts.sessionValid(hash, user),
+        "Access to this workspace changed. Refresh to continue.",
+      );
+      rooms.record(
+        id,
+        "access.changed",
+        visibility === "link" ? "Anyone with the link" : "Restricted",
+        res.locals.actor,
+      );
+    }
+    res.json({ visibility });
   });
   // Account sharing: owners and editors add existing registered users as Viewer or Editor.
   // This only places the workspace in their Shared with Me list (and, for editors, grants
@@ -570,10 +630,12 @@ export function createApp(
   const userName = (userId: string) =>
     (rooms.db.prepare("SELECT display_name FROM users WHERE id=?").get(userId)
       ?.display_name as string | undefined) ?? "A user";
-  // A changed or revoked share reconnects that user's live sockets with fresh rights.
-  const dropShareSockets = (workspaceId: string, userId: string) =>
-    rooms.disconnect(
-      (auth) => auth.userId === userId && auth.workspaceId === workspaceId,
+  // A changed or revoked share reconnects the sessions whose rights changed (that user's);
+  // a session that keeps the same access through a team or link stays connected.
+  const dropShareSockets = (workspaceId: string, _userId: string) =>
+    rooms.revalidate(
+      workspaceId,
+      (hash, user) => accounts.sessionValid(hash, user),
       "Your access to this workspace changed. Refresh to continue.",
     );
   app.get("/api/rooms/:roomId/shares", (_req, res) => {
@@ -656,6 +718,101 @@ export function createApp(
       rooms.record(id, "share.removed", name, res.locals.actor);
     }
     res.json({ shares: shareList(id) });
+  });
+  // Team sharing: the workspace owner shares with a team they belong to, as Viewer or Editor.
+  // Members get that role while they're members. People with direct Editor access can see
+  // the team shares but not change them; team roles never grant sharing management.
+  const revalidateWorkspace = (workspaceId: string) =>
+    rooms.revalidate(
+      workspaceId,
+      (hash, user) => accounts.sessionValid(hash, user),
+      "Your access to this workspace changed. Refresh to continue.",
+    );
+  const teamShareList = (workspaceId: string) =>
+    rooms.db
+      .prepare(
+        "SELECT s.team_id AS teamId,t.name,s.role,s.created_at AS createdAt,(SELECT COUNT(*) FROM team_members m WHERE m.team_id=s.team_id) AS memberCount FROM workspace_team_shares s JOIN teams t ON t.id=s.team_id WHERE s.workspace_id=? ORDER BY t.name COLLATE NOCASE",
+      )
+      .all(workspaceId);
+  const TEAM_ID = /^[0-9a-f-]{36}$/;
+  app.get("/api/rooms/:roomId/team-shares", (_req, res) => {
+    if (!res.locals.canShare) {
+      res.status(403).json({ error: "Only the workspace owner and editors can see sharing." });
+      return;
+    }
+    res.json({ teamShares: teamShareList(res.locals.workspace.id) });
+  });
+  app.use("/api/rooms/:roomId/team-shares", (req, res, next) => {
+    if (req.method !== "GET" && res.locals.access !== "owner") {
+      res.status(403).json({ error: "Only the workspace owner can share it with a team." });
+      return;
+    }
+    next();
+  });
+  app.post(
+    "/api/rooms/:roomId/team-shares",
+    rateLimit({
+      windowMs: 10 * 60_000,
+      limit: 60,
+      standardHeaders: "draft-8",
+      legacyHeaders: false,
+      message: { error: "Too many sharing changes. Wait a few minutes and try again." },
+    }),
+    (req, res) => {
+      const session = res.locals.session as Session;
+      const id = res.locals.workspace.id as string;
+      const teamId = String(req.body?.teamId ?? "");
+      const role = req.body?.role ?? "viewer";
+      if (!isShareRole(role)) throw new Error("Choose Viewer or Editor.");
+      // Only teams the owner belongs to (the same 404 for teams that don't exist).
+      const team = TEAM_ID.test(teamId)
+        ? rooms.db
+            .prepare("SELECT t.name FROM team_members m JOIN teams t ON t.id=m.team_id WHERE m.team_id=? AND m.user_id=?")
+            .get(teamId, session.user.id)
+        : undefined;
+      if (!team) {
+        res.status(404).json({ error: "Choose one of your teams." });
+        return;
+      }
+      const now = Date.now();
+      const existed = !!rooms.db.prepare("SELECT 1 FROM workspace_team_shares WHERE workspace_id=? AND team_id=?").get(id, teamId);
+      rooms.db
+        .prepare(
+          "INSERT INTO workspace_team_shares (workspace_id,team_id,role,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?) ON CONFLICT(workspace_id,team_id) DO UPDATE SET role=excluded.role,updated_at=excluded.updated_at",
+        )
+        .run(id, teamId, role, session.user.id, now, now);
+      revalidateWorkspace(id);
+      rooms.record(id, existed ? "team.changed" : "team.shared", `${team.name} (${role})`, res.locals.actor);
+      res.status(existed ? 200 : 201).json({ teamShares: teamShareList(id) });
+    },
+  );
+  app.patch("/api/rooms/:roomId/team-shares/:teamId", (req, res) => {
+    const id = res.locals.workspace.id as string, teamId = String(req.params.teamId);
+    if (!isShareRole(req.body?.role)) throw new Error("Choose Viewer or Editor.");
+    const changed = rooms.db
+      .prepare("UPDATE workspace_team_shares SET role=?,updated_at=? WHERE workspace_id=? AND team_id=?")
+      .run(req.body.role, Date.now(), id, teamId).changes;
+    if (!changed) {
+      res.status(404).json({ error: "That team no longer has access." });
+      return;
+    }
+    revalidateWorkspace(id);
+    const name = rooms.db.prepare("SELECT name FROM teams WHERE id=?").get(teamId)?.name;
+    rooms.record(id, "team.changed", `${name} (${req.body.role})`, res.locals.actor);
+    res.json({ teamShares: teamShareList(id) });
+  });
+  // The owner can remove a team share at any time, even after leaving that team.
+  app.delete("/api/rooms/:roomId/team-shares/:teamId", (req, res) => {
+    const id = res.locals.workspace.id as string, teamId = String(req.params.teamId);
+    const name = rooms.db.prepare("SELECT name FROM teams WHERE id=?").get(teamId)?.name;
+    const removed = rooms.db
+      .prepare("DELETE FROM workspace_team_shares WHERE workspace_id=? AND team_id=?")
+      .run(id, teamId).changes;
+    if (removed) {
+      revalidateWorkspace(id);
+      rooms.record(id, "team.removed", String(name ?? "A team"), res.locals.actor);
+    }
+    res.json({ teamShares: teamShareList(id) });
   });
   // Renaming or deleting the workspace itself is a management action.
   const requireManager: express.RequestHandler = (_req, res, next) => {

@@ -63,9 +63,10 @@ export async function createRoom(
     body: JSON.stringify(fields),
   });
   const text = await response.text();
+  // Real v1 workspaces have general access 'link' (anyone with the link can view).
   if (response.status === 201 && typeof editorTokenHash === "string")
     app.rooms.db
-      .prepare("UPDATE rooms SET editor_token_hash=?,owner_id=NULL WHERE id=?")
+      .prepare("UPDATE rooms SET editor_token_hash=?,owner_id=NULL,visibility='link' WHERE id=?")
       .run(editorTokenHash, JSON.parse(text).id);
   return new Response(text, {
     status: response.status,

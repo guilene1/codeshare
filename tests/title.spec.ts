@@ -11,7 +11,7 @@ test("tab title is exactly the branded title on every page", async ({ page, brow
   }
   await signUp(page, "Title Owner");
   await expect(page).toHaveTitle(TITLE); // My Workspaces dashboard
-  const url = await createWorkspace(page, "Title workspace");
+  const url = await createWorkspace(page, "Title workspace", { studentLink: true });
   await expect(page).toHaveTitle(TITLE);
   await page.reload();
   await expect(page).toHaveTitle(TITLE);

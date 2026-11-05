@@ -19,7 +19,7 @@ test("rate limits: a 100-student class on one IP can load a lesson; writes stay 
     const room = await fetch(base + "/api/rooms", {
       method: "POST",
       headers: { ...owner.headers, "content-type": "application/json" },
-      body: JSON.stringify({ name: "Class" }),
+      body: JSON.stringify({ name: "Class", visibility: "link" }),
     }).then((r) => r.json());
     const png = Buffer.from(
       "89504e470d0a1a0a0000000d4948445200000001000000010806000000" + "1f15c4890000000d49444154789c636000010000050001" + "0d0a2db40000000049454e44ae426082",

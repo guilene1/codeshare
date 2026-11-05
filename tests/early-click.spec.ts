@@ -80,7 +80,7 @@ test("a file clicked before the first sync opens for Owners, Editors and Viewers
     await signUp(edPage, "Ed Editor", edEmail);
     await signUp(veraPage, "Vera Viewer", veraEmail);
     await signUp(ownerPage, "Olivia Owner");
-    const url = await createWorkspace(ownerPage, "Early clicks");
+    const url = await createWorkspace(ownerPage, "Early clicks", { studentLink: true });
     for (const share of [
       { email: edEmail, role: "editor" },
       { email: veraEmail, role: "viewer" },
@@ -145,7 +145,7 @@ test("remembered tabs restore after refresh, and an immediate click after refres
 test("a viewer clicking into a folder before its first sync opens that file", async ({ page, browser }) => {
   test.setTimeout(120_000);
   await signUp(page, "Folder Owner");
-  const url = await createWorkspace(page, "Folder clicks");
+  const url = await createWorkspace(page, "Folder clicks", { studentLink: true });
   const folder = await apiCall(page, "/folders", "POST", { name: "Week 1" });
   expect(folder.status).toBe(201);
   for (const filename of ["lab.py", "notes.py"]) {
@@ -182,7 +182,7 @@ test("View Only: no view switch or language label; Explorer, tabs, highlighting 
   const { ownerContext, viewerContext, owner, viewer } = await viewerAndOwner(browser);
   try {
     await signUp(owner, "UI Owner");
-    const url = await createWorkspace(owner, "Clean viewer");
+    const url = await createWorkspace(owner, "Clean viewer", { studentLink: true });
     const fence = "`".repeat(3);
     expect(
       (

@@ -109,7 +109,7 @@ test("code blocks: highlighted Kubernetes YAML, exact indentation and copy, full
   viewer.on("pageerror", (e) => errors.push(e.message));
   try {
     await signUp(owner, "Instructor");
-    const url = await createWorkspace(owner, "Kubernetes basics");
+    const url = await createWorkspace(owner, "Kubernetes basics", { studentLink: true });
     expect(await createLesson(owner, "deploy.md", lesson)).toBe(201);
 
     // Viewer: opens straight into the formatted Preview, with no view toggle.

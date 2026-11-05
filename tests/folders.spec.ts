@@ -13,7 +13,7 @@ test("six-month course explorer navigates nested lessons, highlights Terraform/P
   viewer.on("pageerror", (error) => errors.push(error.message));
   try {
     await signUp(owner, "Instructor");
-    await createWorkspace(owner, "DevOps Class");
+    await createWorkspace(owner, "DevOps Class", { studentLink: true });
     async function folder(name: string) {
       await owner
         .getByRole("button", { name: "Create folder", exact: true })

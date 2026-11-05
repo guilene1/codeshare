@@ -210,7 +210,9 @@ export default function ImageViewer({
           >
             1:1
           </button>
-          {canOpenOriginal && (
+          {/* Browsers won't open data: URLs in a new tab (an Edit Link guest's copy of an image
+              in a Restricted workspace), so Original is offered for real image URLs only. */}
+          {canOpenOriginal && !src.startsWith("data:") && (
             <a className="text-button" href={src} target="_blank" rel="noopener noreferrer" title="Open the original file in a new tab">
               <ExternalLink size={14} /> Original
             </a>

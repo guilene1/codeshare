@@ -90,7 +90,7 @@ test("URLs in Markdown and Plain Text documents are clickable links (new tab, bl
   viewer.on("pageerror", (e) => errors.push(e.message));
   try {
     await signUp(owner, "Instructor");
-    const url = await createWorkspace(owner, "Links");
+    const url = await createWorkspace(owner, "Links", { studentLink: true });
     const image = await uploadPng(owner);
     const markdown = [
       "# Project links",

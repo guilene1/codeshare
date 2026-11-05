@@ -84,7 +84,7 @@ test("images: exact bytes, validated types and limits, editor-only uploads, publ
     const create = await fetch(base + "/api/rooms", {
       method: "POST",
       headers: { ...owner.headers, "content-type": "application/json" },
-      body: JSON.stringify({ name: "Kubernetes architecture" }),
+      body: JSON.stringify({ name: "Kubernetes architecture", visibility: "link" }),
     });
     assert.equal(create.status, 201);
     const room = (await create.json()).id as string;
@@ -168,7 +168,7 @@ test("images: exact bytes, validated types and limits, editor-only uploads, publ
     const other = await fetch(base + "/api/rooms", {
       method: "POST",
       headers: { ...owner.headers, "content-type": "application/json" },
-      body: JSON.stringify({ name: "Other" }),
+      body: JSON.stringify({ name: "Other", visibility: "link" }),
     }).then((r) => r.json());
     assert.equal((await fetch(`${base}/api/rooms/${other.id}/images/${stored.id}`)).status, 404);
     assert.equal((await view("../../etc/passwd")).status, 404);

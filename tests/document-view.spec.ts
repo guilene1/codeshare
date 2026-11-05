@@ -35,7 +35,7 @@ test("documents open in Preview; Edit or Split holds across files for the page s
   try {
     const owner = await ownerContext.newPage();
     await signUp(owner, "View Owner");
-    const url = await createWorkspace(owner, "Document views");
+    const url = await createWorkspace(owner, "Document views", { studentLink: true });
     for (const [filename, language, content] of [
       ["guide.md", "markdown", "# Guide\n\nRead **this** first.\n"],
       ["notes.txt", "plaintext", "Plain notes\n"],
@@ -100,7 +100,7 @@ test("the toolbar Close file button closes only the active tab, like the tab X a
   try {
     const owner = await ownerContext.newPage();
     await signUp(owner, "Close Owner");
-    const url = await createWorkspace(owner, "Closing tabs");
+    const url = await createWorkspace(owner, "Closing tabs", { studentLink: true });
     const ids: Record<string, string> = {};
     for (const [filename, language, content] of [
       ["one.md", "markdown", "# One\n"],

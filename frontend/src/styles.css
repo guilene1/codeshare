@@ -23,6 +23,54 @@
 .workspace-card-bottom { margin-top:18px; padding-top:14px; border-top:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; gap:10px; font-size:11px; color:var(--faint); }
 .workspace-card-bottom .text-button { color:var(--accent); }
 .shared-with-me { margin-top:44px; }
+/* Dashboard sections: My Workspaces, Shared with Me, My Teams, Team Workspaces. */
+.dashboard-nav { display:flex; gap:4px; margin:0 0 28px; border-bottom:1px solid var(--border); overflow-x:auto; scrollbar-width:none; }
+.dashboard-nav button { display:inline-flex; align-items:center; gap:7px; flex-shrink:0; background:transparent; border:0; border-bottom:2px solid transparent; margin-bottom:-1px; padding:10px 12px; color:var(--muted); font-size:13px; font-weight:550; }
+.dashboard-nav button:hover { color:var(--text); }
+.dashboard-nav button[aria-current=page] { color:var(--text); border-bottom-color:var(--accent); }
+.nav-count { min-width:18px; padding:0 5px; border-radius:999px; background:var(--accent); color:#fff; font-size:11px; line-height:18px; text-align:center; }
+.workspace-dashboard > .dashboard-nav + .shared-with-me { margin-top:0; }
+/* Subtle access indicators on workspace cards. */
+.workspace-card-icon { align-items:center; gap:10px; }
+.card-badges { display:inline-flex; flex-wrap:wrap; gap:5px; }
+.card-badge { display:inline-flex; align-items:center; gap:4px; font-size:10.5px; font-weight:550; padding:1px 7px; border-radius:999px; color:var(--muted); border:1px solid var(--border); }
+.card-badge.link { color:#68b9cb; border-color:#68b9cb30; }
+.card-badge.shared { color:var(--accent); border-color:transparent; background:var(--accent-soft); }
+.card-badge.team { color:#d9a35b; border-color:#d9a35b33; }
+/* Teams */
+.team-role { display:inline-flex; align-items:center; gap:4px; font-size:11px; font-weight:600; padding:2px 8px; border-radius:999px; color:var(--muted); border:1px solid var(--border); white-space:nowrap; }
+.team-role.owner { color:#d9a35b; border-color:#d9a35b33; }
+.team-role.admin { color:var(--accent); background:var(--accent-soft); border-color:transparent; }
+.team-role.pending { font-weight:500; }
+/* Share popup, Teams with access: the team picker takes the free width (its own row on phones). */
+.team-access .people-add select:first-child { flex:1; min-width:0; }
+.team-access .people-list strong { overflow-wrap:anywhere; }
+@media (max-width:650px) { .team-access .people-add { flex-wrap:wrap; } .team-access .people-add select:first-child { flex-basis:100%; } .team-access .people-add .button { flex:1; justify-content:center; } }
+/* In people lists only the name column stretches; role labels keep their own width. */
+.people-list li > .team-role { flex:0 0 auto; flex-direction:row; }
+.team-view > .text-button { margin-bottom:12px; }
+.team-actions { display:flex; flex-wrap:wrap; gap:8px; }
+.team-section { margin-top:30px; max-width:850px; }
+.team-workspaces .team-section, .team-view .team-section:last-of-type { max-width:none; }
+.team-section h3 { display:flex; align-items:center; gap:8px; font-size:14px; font-weight:600; margin-bottom:10px; }
+.team-section .workspace-grid { margin-top:12px; }
+.team-transfer { display:flex; align-items:flex-end; gap:8px; margin-top:16px; max-width:460px; }
+.team-transfer .field { flex:1; margin:0; }
+.team-invitations { margin-bottom:28px; max-width:850px; }
+.team-invitations h3 { font-size:12px; text-transform:uppercase; letter-spacing:1px; color:var(--muted); margin-bottom:10px; }
+.team-invitation { display:flex; align-items:center; gap:12px; padding:14px 16px; margin-top:8px; border:1px solid var(--border); border-radius:10px; background:var(--surface); }
+.team-invitation > svg { color:var(--accent); flex-shrink:0; }
+.team-invitation > span { flex:1; min-width:0; display:flex; flex-direction:column; font-size:13px; }
+.team-invitation small { color:var(--muted); }
+@media (max-width:650px) {
+  .team-invitation { flex-wrap:wrap; }
+  .team-invitation > span { flex-basis:calc(100% - 40px); }
+  .team-invitation .button { flex:1; justify-content:center; }
+  .team-transfer { flex-direction:column; align-items:stretch; }
+  .team-members li { flex-wrap:wrap; }
+  .team-section .people-add { flex-wrap:wrap; }
+  .team-section .people-add input { flex-basis:100%; }
+}
 .role-badge { font-size:11px; font-weight:600; padding:2px 8px; border-radius:999px; color:#68b9cb; background:#68b9cb12; border:1px solid #68b9cb30; }
 .role-badge.editor { color:var(--accent); background:var(--accent-soft); border-color:transparent; }
 .dashboard-filters { display:flex; gap:14px; margin-bottom:24px; }
@@ -135,7 +183,8 @@
 .private-access h3 {
   color: var(--accent);
 }
-.access-share-section.people-access {
+.access-share-section.people-access,
+.access-share-section.team-access {
   border-top: 1px solid var(--border);
   padding-top: 22px;
   margin-top: 22px;

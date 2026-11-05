@@ -12,7 +12,7 @@ test("instructor broadcasts to read-only students without leaking the private li
   viewer.on("pageerror", (e) => errors.push(e.message));
   try {
     await signUp(owner, "Instructor");
-    const ownerUrl = await createWorkspace(owner, "Cloud classroom");
+    const ownerUrl = await createWorkspace(owner, "Cloud classroom", { studentLink: true });
     await owner.getByRole("button", { name: "Share", exact: true }).click();
     const studentUrl = await owner
       .getByLabel("Student link", { exact: true })

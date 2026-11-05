@@ -105,7 +105,7 @@ test("Explorer X on a phone and for read-only students", async ({ browser }) => 
   try {
     const owner = await ownerContext.newPage();
     await signUp(owner, "Phone Owner");
-    const url = await createWorkspace(owner, "Phone close");
+    const url = await createWorkspace(owner, "Phone close", { studentLink: true });
     expect((await api(owner, "/documents", "POST", { filename: "guide.md", language: "markdown", content: "# Guide\n" })).status).toBe(201);
     const before = await snapshot(owner);
 

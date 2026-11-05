@@ -34,7 +34,7 @@ test("owners and account editors copy the same active Edit Link again later; nob
       editor = await signUp(base, origin, "Editor"),
       viewer = await signUp(base, origin, "Viewer"),
       outsider = await signUp(base, origin, "Outsider");
-    const { id } = (await (await call("/rooms", "POST", { name: "Course", language: "markdown" }, owner.headers)).json()) as { id: string };
+    const { id } = (await (await call("/rooms", "POST", { name: "Course", language: "markdown", visibility: "link" }, owner.headers)).json()) as { id: string };
     for (const [who, role] of [[editor, "editor"], [viewer, "viewer"]] as const)
       assert.equal((await call(`/rooms/${id}/shares`, "POST", { email: who.email, role }, owner.headers)).status, 201);
     const fetchLink = async (headers: Record<string, string>) => {

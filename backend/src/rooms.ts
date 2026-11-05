@@ -3,7 +3,14 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { Awareness } from "y-protocols/awareness";
 import type { WebSocket } from "ws";
-import { equalHash, type Access, type Auth } from "./access.js";
+import {
+  canEditAccess,
+  equalHash,
+  workspaceAccess,
+  type Access,
+  type Auth,
+  type Visibility,
+} from "./access.js";
 import { blockFields, MAX_BLOCKS, orderedBlocks } from "./blocks.js";
 import { templates } from "./templates.js";
 
@@ -265,6 +272,8 @@ export class Rooms {
     description = "",
     ownerId: string | null = null,
     actor?: Actor,
+    // New workspaces are private unless the caller asks for link access.
+    visibility: Visibility = "private",
   ) {
     const id = randomBytes(12).toString("base64url"),
       now = Date.now(),
@@ -300,7 +309,7 @@ export class Rooms {
         addDocument(room, file, language, content);
     this.db
       .prepare(
-        "INSERT INTO rooms (id,name,created_at,updated_at,last_activity,state,editor_token_hash,description,owner_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO rooms (id,name,created_at,updated_at,last_activity,state,editor_token_hash,description,owner_id,visibility) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         id,
@@ -312,6 +321,7 @@ export class Rooms {
         editorHash,
         description,
         ownerId,
+        visibility,
       );
     this.save(room);
     this.syncCatalog(id);
@@ -363,7 +373,7 @@ export class Rooms {
   info(id: string) {
     return this.db
       .prepare(
-        "SELECT id,name,description,created_at,updated_at,owner_id,editor_token_hash IS NOT NULL AS has_editor_link FROM rooms WHERE id=?",
+        "SELECT id,name,description,created_at,updated_at,owner_id,visibility,editor_token_hash IS NOT NULL AS has_editor_link FROM rooms WHERE id=?",
       )
       .get(id);
   }
@@ -449,7 +459,8 @@ export class Rooms {
     room.edits.set(fileId + "|" + who, { fileId, actor });
   }
   presence(workspaceId: string, recipient: WebSocket): PresenceSummary {
-    const rank = { viewer: 0, editor: 1, owner: 2 };
+    // "none" never has a live socket (refused at the handshake); listed for completeness.
+    const rank = { none: -1, viewer: 0, editor: 1, owner: 2 };
     const self = this.live.get(recipient);
     const users = new Map<string, PresenceSummary["users"][number]>(),
       guests: PresenceSummary["guests"] = [];
@@ -465,7 +476,7 @@ export class Rooms {
             role: live.access,
             you: live.userId === self?.userId,
           });
-      } else if (live.access !== "viewer")
+      } else if (canEditAccess(live.access))
         guests.push({ name: live.name || "Guest editor", you: peer === recipient });
       else anonymous++;
     }
@@ -539,6 +550,22 @@ export class Rooms {
   disconnect(match: (auth: Auth) => boolean, reason: string) {
     for (const [peer, auth] of this.connections)
       if (match(auth)) peer.close(1008, reason);
+  }
+  // Re-checks every live socket of a workspace after an access change (general access,
+  // shares) and closes those whose rights changed; they reconnect with their new rights,
+  // or are refused if they no longer have any. Unaffected sockets stay connected.
+  revalidate(
+    workspaceId: string,
+    sessionValid: (tokenHash: string, userId: string) => boolean,
+    reason: string,
+  ) {
+    for (const [peer, auth] of this.connections)
+      if (
+        auth.workspaceId === workspaceId &&
+        workspaceAccess(this.db, sessionValid, workspaceId, auth) !==
+          this.live.get(peer)?.access
+      )
+        peer.close(1008, reason);
   }
   canEditHash(id: string, supplied: string | undefined) {
     if (!supplied) return false;

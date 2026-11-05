@@ -21,7 +21,7 @@ const COUNT_SOCKETS = () => {
 test("a viewer alone in a quiet workspace stays connected past y-websocket's 30 s timeout", async ({ page, browser }) => {
   test.setTimeout(120_000);
   await signUp(page, "Quiet Owner");
-  const url = await createWorkspace(page, "Quiet workspace");
+  const url = await createWorkspace(page, "Quiet workspace", { studentLink: true });
   await page.close(); // no editor stays connected
   const context = await browser.newContext();
   try {

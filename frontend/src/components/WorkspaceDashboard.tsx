@@ -6,16 +6,20 @@ import {
   FileCode2,
   FolderOpen,
   History,
+  Link2,
   Loader2,
+  Lock,
   LogOut,
   MoreHorizontal,
   Pencil,
   Plus,
   Search,
   Trash2,
+  UserPlus,
   Users,
 } from "lucide-react";
 import Modal from "./Modal";
+import { MyTeams, TeamWorkspaces } from "./Teams";
 import { api, readLocal } from "../lib";
 import {
   activityText,
@@ -25,6 +29,50 @@ import {
   type OwnedWorkspace,
   type SharedWorkspace,
 } from "../workspaces";
+
+// The dashboard's sections, kept in the URL (?view=…&team=…) so refresh and Back work.
+type View = "workspaces" | "shared" | "teams" | "team-workspaces";
+const views: Array<[View, string]> = [
+  ["workspaces", "My Workspaces"],
+  ["shared", "Shared with Me"],
+  ["teams", "My Teams"],
+  ["team-workspaces", "Team Workspaces"],
+];
+const readView = () => {
+  const params = new URLSearchParams(location.search);
+  const view = params.get("view");
+  const team = params.get("team");
+  return {
+    view: (views.some(([id]) => id === view) ? view : "workspaces") as View,
+    team: team && /^[0-9a-f-]{36}$/.test(team) ? team : null,
+  };
+};
+// Subtle access indicators: Private or Link (general access), plus Shared and Team.
+function AccessBadges({ item }: { item: OwnedWorkspace }) {
+  return (
+    <span className="card-badges">
+      {item.visibility === "private" ? (
+        <span className="card-badge" title="Restricted: only you and people you share with">
+          <Lock size={11} /> Private
+        </span>
+      ) : (
+        <span className="card-badge link" title="Anyone with the link can view">
+          <Link2 size={11} /> Link
+        </span>
+      )}
+      {item.shareCount > 0 && (
+        <span className="card-badge shared" title={`Shared with ${item.shareCount} ${item.shareCount === 1 ? "person" : "people"}`}>
+          <UserPlus size={11} /> Shared
+        </span>
+      )}
+      {item.teamShareCount > 0 && (
+        <span className="card-badge team" title={`Shared with ${item.teamShareCount} team${item.teamShareCount === 1 ? "" : "s"}`}>
+          <Users size={11} /> Team
+        </span>
+      )}
+    </span>
+  );
+}
 
 export default function WorkspaceDashboard({
   navigate,
@@ -50,6 +98,27 @@ export default function WorkspaceDashboard({
   const [importNotes, setImportNotes] = useState<string[]>([]);
   const [shared, setShared] = useState<SharedWorkspace[] | null>(null);
   const [sharedError, setSharedError] = useState("");
+  const [{ view, team }, setLocation] = useState(readView);
+  const [invitationCount, setInvitationCount] = useState(0);
+  const go = (next: View, nextTeam: string | null = null) => {
+    const params = new URLSearchParams();
+    if (next !== "workspaces") params.set("view", next);
+    if (nextTeam) params.set("team", nextTeam);
+    const query = params.toString();
+    history.pushState({}, "", location.pathname + (query ? "?" + query : ""));
+    setLocation({ view: next, team: nextTeam });
+  };
+  useEffect(() => {
+    const back = () => setLocation(readView());
+    addEventListener("popstate", back);
+    return () => removeEventListener("popstate", back);
+  }, []);
+  // Pending team invitations show as a count on My Teams, whichever view is open.
+  useEffect(() => {
+    api<{ invitations: unknown[] }>("/me/invitations")
+      .then((r) => setInvitationCount(r.invitations.length))
+      .catch(() => {});
+  }, []);
   async function load() {
     try {
       const result = await api<{ workspaces: OwnedWorkspace[] }>("/me/workspaces");
@@ -154,8 +223,122 @@ export default function WorkspaceDashboard({
     }
     setMenu(null);
   }
+  const nav = (
+    <nav className="dashboard-nav" aria-label="Workspaces and teams">
+      {views.map(([id, label]) => (
+        <button key={id} aria-current={view === id ? "page" : undefined} onClick={() => go(id)}>
+          {label}
+          {id === "teams" && invitationCount > 0 && (
+            <span className="nav-count" aria-label={`${invitationCount} pending invitation${invitationCount === 1 ? "" : "s"}`}>
+              {invitationCount}
+            </span>
+          )}
+        </button>
+      ))}
+    </nav>
+  );
+  if (view === "teams")
+    return (
+      <section className="workspace-dashboard" aria-label="My Teams">
+        {nav}
+        <MyTeams team={team} onSelect={(id) => go("teams", id)} notify={notify} open={open} onInvitations={setInvitationCount} />
+      </section>
+    );
+  if (view === "team-workspaces")
+    return (
+      <section className="workspace-dashboard" aria-label="Team Workspaces">
+        {nav}
+        <TeamWorkspaces open={open} />
+      </section>
+    );
+  const sharedSection = (
+      <section className="shared-with-me" aria-label="Shared with Me">
+        <div className="dashboard-heading">
+          <div>
+            <h2>Shared with Me</h2>
+            <p>Workspaces other owners shared with your account.</p>
+          </div>
+        </div>
+        {sharedError ? (
+          <p className="error" role="alert">
+            {sharedError}
+          </p>
+        ) : !shared ? (
+          <p className="dashboard-empty">
+            <Loader2 size={20} className="spin" /> Loading shared workspaces…
+          </p>
+        ) : !shared.length ? (
+          <p className="dashboard-empty">
+            Nothing has been shared with you yet. When an owner shares a
+            workspace with your email, it appears here.
+          </p>
+        ) : (
+          <div className="workspace-grid">
+            {shared.map((item) => (
+              <article
+                className="workspace-card"
+                key={item.id}
+                aria-label={item.name}
+              >
+                <div className="workspace-card-top">
+                  <span className="workspace-card-icon">
+                    <Users size={19} />
+                  </span>
+                  <div className="shortcut-menu">
+                    <button
+                      className="icon-button"
+                      aria-label={`Manage ${item.name}`}
+                      aria-expanded={menu === "shared:" + item.id}
+                      onClick={() =>
+                        setMenu(menu === "shared:" + item.id ? null : "shared:" + item.id)
+                      }
+                    >
+                      <MoreHorizontal size={18} />
+                    </button>
+                    {menu === "shared:" + item.id && (
+                      <div role="menu">
+                        <button
+                          className="danger-item"
+                          onClick={() => void leave(item)}
+                        >
+                          <LogOut size={14} /> Remove from my list
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <h3>{item.name}</h3>
+                <p className="workspace-description">
+                  {item.description || "Lessons, files and code examples."}
+                </p>
+                <div className="workspace-card-counts">
+                  <span className={"role-badge " + item.role}>
+                    {item.role === "editor" ? "Editor" : "Viewer"}
+                  </span>
+                  {item.ownerName && <> Shared by {item.ownerName}</>}
+                </div>
+                <div className="workspace-card-bottom">
+                  <span>Updated {relativeTime(item.updated_at)}</span>
+                  <button className="text-button" onClick={() => open(item.id)}>
+                    Open <ArrowRight size={15} />
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+  );
+  if (view === "shared")
+    return (
+      <section className="workspace-dashboard" aria-label="Shared with Me">
+        {nav}
+        {sharedSection}
+      </section>
+    );
   return (
     <section className="workspace-dashboard" aria-label="My Workspaces">
+      {nav}
       <div className="dashboard-heading">
         <div>
           <h2>My Workspaces</h2>
@@ -247,6 +430,7 @@ export default function WorkspaceDashboard({
               <div className="workspace-card-top">
                 <span className="workspace-card-icon">
                   <FolderOpen size={19} />
+                  <AccessBadges item={item} />
                 </span>
                 <div className="shortcut-menu">
                   <button
@@ -310,82 +494,7 @@ export default function WorkspaceDashboard({
           ))}
         </div>
       )}
-      <section className="shared-with-me" aria-label="Shared with Me">
-        <div className="dashboard-heading">
-          <div>
-            <h2>Shared with Me</h2>
-            <p>Workspaces other owners shared with your account.</p>
-          </div>
-        </div>
-        {sharedError ? (
-          <p className="error" role="alert">
-            {sharedError}
-          </p>
-        ) : !shared ? (
-          <p className="dashboard-empty">
-            <Loader2 size={20} className="spin" /> Loading shared workspaces…
-          </p>
-        ) : !shared.length ? (
-          <p className="dashboard-empty">
-            Nothing has been shared with you yet. When an owner shares a
-            workspace with your email, it appears here.
-          </p>
-        ) : (
-          <div className="workspace-grid">
-            {shared.map((item) => (
-              <article
-                className="workspace-card"
-                key={item.id}
-                aria-label={item.name}
-              >
-                <div className="workspace-card-top">
-                  <span className="workspace-card-icon">
-                    <Users size={19} />
-                  </span>
-                  <div className="shortcut-menu">
-                    <button
-                      className="icon-button"
-                      aria-label={`Manage ${item.name}`}
-                      aria-expanded={menu === "shared:" + item.id}
-                      onClick={() =>
-                        setMenu(menu === "shared:" + item.id ? null : "shared:" + item.id)
-                      }
-                    >
-                      <MoreHorizontal size={18} />
-                    </button>
-                    {menu === "shared:" + item.id && (
-                      <div role="menu">
-                        <button
-                          className="danger-item"
-                          onClick={() => void leave(item)}
-                        >
-                          <LogOut size={14} /> Remove from my list
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-                <h3>{item.name}</h3>
-                <p className="workspace-description">
-                  {item.description || "Lessons, files and code examples."}
-                </p>
-                <div className="workspace-card-counts">
-                  <span className={"role-badge " + item.role}>
-                    {item.role === "editor" ? "Editor" : "Viewer"}
-                  </span>
-                  {item.ownerName && <> Shared by {item.ownerName}</>}
-                </div>
-                <div className="workspace-card-bottom">
-                  <span>Updated {relativeTime(item.updated_at)}</span>
-                  <button className="text-button" onClick={() => open(item.id)}>
-                    Open <ArrowRight size={15} />
-                  </button>
-                </div>
-              </article>
-            ))}
-          </div>
-        )}
-      </section>
+      {sharedSection}
       {!!activity.length && (
         <section className="recent-activity" aria-label="Recent activity">
           <h3>

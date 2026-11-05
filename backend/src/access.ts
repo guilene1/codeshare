@@ -21,12 +21,22 @@ export type Auth = {
   // Set on live sockets so a share change can disconnect just that workspace.
   workspaceId?: string;
 };
-export type Access = "owner" | "editor" | "viewer";
+// "none" means no access at all: the workspace is private and nothing grants entry. It must
+// never be treated as edit rights; use canEditAccess / canReadAccess, not `!== "viewer"`.
+export type Access = "owner" | "editor" | "viewer" | "none";
+export const canEditAccess = (access: Access) =>
+  access === "owner" || access === "editor";
+export const canReadAccess = (access: Access) => access !== "none";
+export type Visibility = "link" | "private";
+export const isVisibility = (value: unknown): value is Visibility =>
+  value === "link" || value === "private";
 export type ShareRole = "viewer" | "editor";
 export const isShareRole = (value: unknown): value is ShareRole =>
   value === "viewer" || value === "editor";
-// Single source of truth for edit rights, re-evaluated on every REST request and
-// every WebSocket write so revoked sessions and links lose access immediately.
+// Single source of truth for read and edit rights, re-evaluated on every REST request and
+// every WebSocket message so revoked sessions, shares and links lose access immediately.
+// The highest grant wins: owner, then editor (share or Edit Link), then viewer (share, or
+// anyone with the link when the workspace's general access is 'link').
 export function workspaceAccess(
   db: DatabaseSync,
   sessionValid: (tokenHash: string, userId: string) => boolean,
@@ -34,26 +44,39 @@ export function workspaceAccess(
   auth: Auth,
 ): Access {
   const row = db
-    .prepare("SELECT owner_id,editor_token_hash FROM rooms WHERE id=?")
+    .prepare("SELECT owner_id,editor_token_hash,visibility FROM rooms WHERE id=?")
     .get(workspaceId);
-  if (!row) return "viewer";
+  if (!row) return "none";
   const signedIn =
     !!auth.userId &&
     !!auth.sessionHash &&
     sessionValid(auth.sessionHash, auth.userId);
   if (signedIn && row.owner_id === auth.userId) return "owner";
-  // Account shares: an explicit editor share grants editing; a viewer share adds nothing
-  // beyond the public link except the Shared with Me entry.
-  if (
-    signedIn &&
-    db
-      .prepare(
-        "SELECT 1 FROM workspace_shares WHERE workspace_id=? AND user_id=? AND role='editor'",
-      )
-      .get(workspaceId, auth.userId!)
-  )
-    return "editor";
+  const share = signedIn
+    ? (db
+        .prepare(
+          "SELECT role FROM workspace_shares WHERE workspace_id=? AND user_id=?",
+        )
+        .get(workspaceId, auth.userId!)?.role as ShareRole | undefined)
+    : undefined;
+  const team = signedIn ? teamRole(db, workspaceId, auth.userId!) : undefined;
+  if (share === "editor" || team === "editor") return "editor";
   if (auth.tokenHash && equalHash(row.editor_token_hash, auth.tokenHash))
     return "editor";
-  return "viewer";
+  if (share === "viewer" || team === "viewer") return "viewer";
+  return row.visibility === "private" ? "none" : "viewer";
+}
+// The highest role any of the user's current teams has on this workspace (team shares).
+// Read live, so joining a team grants it and leaving or removal takes it away at once.
+export function teamRole(
+  db: DatabaseSync,
+  workspaceId: string,
+  userId: string,
+): ShareRole | undefined {
+  const best = db
+    .prepare(
+      "SELECT MAX(CASE s.role WHEN 'editor' THEN 2 ELSE 1 END) AS rank FROM workspace_team_shares s JOIN team_members m ON m.team_id=s.team_id WHERE s.workspace_id=? AND m.user_id=?",
+    )
+    .get(workspaceId, userId)?.rank;
+  return best === 2 ? "editor" : best === 1 ? "viewer" : undefined;
 }
