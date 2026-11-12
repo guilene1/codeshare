@@ -8,6 +8,7 @@ import type { Server } from "node:http";
 import {
   MAX_CONTENT,
   Rooms,
+  scopeKeyOf,
   validateDocument,
   type Actor,
   type Room,
@@ -15,9 +16,10 @@ import {
 import {
   canEditAccess,
   canReadAccess,
+  folderScope,
   hashEditorToken,
   TOKEN_PATTERN,
-  workspaceAccess,
+  lessonAccess,
   type Auth,
 } from "./access.js";
 import type { Accounts } from "./auth.js";
@@ -31,6 +33,9 @@ function send(peer: WebSocket, data: Uint8Array) {
 }
 // Message type 4 (Kodelumi): JSON presence and activity, sent only to Owners and Editors.
 const MESSAGE_JSON = 4;
+// Message type 5 (Kodelumi): data-free JSON notices for every socket of a workspace, such as
+// {"tree":true} when its folders or files change; clients re-read over REST.
+const MESSAGE_NOTICE = 5;
 function awarenessMessage(room: Room, ids: number[]) {
   const enc = encoding.createEncoder();
   encoding.writeVarUint(enc, 1);
@@ -131,6 +136,12 @@ export function setupWebsocket(
     encoding.writeVarString(enc, JSON.stringify(payload));
     send(peer, encoding.toUint8Array(enc));
   };
+  rooms.sendNotice = (peer, notice) => {
+    const enc = encoding.createEncoder();
+    encoding.writeVarUint(enc, MESSAGE_NOTICE);
+    encoding.writeVarString(enc, JSON.stringify(notice));
+    send(peer, encoding.toUint8Array(enc));
+  };
   server.on("upgrade", (req, socket, head) => {
     const match = /^\/ws\/([A-Za-z0-9_-]{16})$/.exec(
       (req.url ?? "").split("?")[0],
@@ -162,13 +173,18 @@ export function setupWebsocket(
         sessionHash: session?.tokenHash,
         tokenHash: credentialHash,
       };
-      const access = () =>
-        workspaceAccess(
+      // Rights in this lesson: workspace access, plus folder grants when it's a folder lesson.
+      // A folder-only recipient reaches only lessons inside their shared folders; the root
+      // and every other lesson look exactly like a workspace that doesn't exist.
+      const rights = () =>
+        lessonAccess(
           rooms.db,
           (hash, user) => accounts.sessionValid(hash, user),
           workspaceId,
+          folder,
           auth,
         );
+      const access = () => rights().access;
       const canEdit = () => canEditAccess(access());
       // Changes are attributed to the verified account, never to a self-entered name.
       const actor: Actor = session
@@ -197,16 +213,28 @@ export function setupWebsocket(
         socket.destroy();
         return;
       }
+      // Held until the socket joins the lesson (or the upgrade fails), so it can't be unloaded
+      // in between to make space for another lesson.
+      const joined = rooms.hold(room);
+      socket.once("close", joined);
       wss.handleUpgrade(req, socket, head, (peer) => {
         wire(rooms, room);
         room.peers.set(peer, new Set());
+        joined();
         rooms.connections.set(peer, { ...auth, workspaceId: room.workspaceId });
+        const opened = rights();
         rooms.live.set(peer, {
           workspaceId: room.workspaceId,
           room,
-          access: access(),
+          access: opened.access,
+          workspace: opened.workspace,
           userId: session?.user.id,
           name: session?.user.displayName.slice(0, 40),
+          // What a folder-only recipient's tree holds as of now (see Rooms.revalidate).
+          scopeKey:
+            opened.workspace === "none" && session
+              ? scopeKeyOf(folderScope(rooms.db, room.workspaceId, session.user.id))
+              : undefined,
         });
         rooms.schedulePresence(room.workspaceId);
         room.touched = Date.now();
@@ -265,12 +293,16 @@ export function setupWebsocket(
                 const data = decoding.readVarUint8Array(dec),
                   candidate = new Y.Doc();
                 const before = room.doc.getMap<Y.Map<unknown>>("documents"),
-                  changed: string[] = [];
+                  changed: string[] = [],
+                  beforeTexts: string[] = [],
+                  afterTexts: string[] = [];
                 // Validate a candidate before applying untrusted CRDT updates to live state.
                 try {
                   Y.applyUpdate(candidate, Y.encodeStateAsUpdate(room.doc));
                   Y.applyUpdate(candidate, data);
                   validateDocument(candidate);
+                  // "catalog" and "workspace" stay empty (workspace metadata is REST-only), so
+                  // a client can never write a tree or name into a lesson others receive.
                   if (
                     JSON.stringify(candidate.getMap("catalog").toJSON()) !==
                     JSON.stringify(room.doc.getMap("catalog").toJSON())
@@ -306,15 +338,26 @@ export function setupWebsocket(
                     ])
                       if (a?.get(key) !== d.get(key))
                         throw new Error("Use the file API");
-                    if (
-                      (a!.get("content") as Y.Text).toString() !==
-                      (d.get("content") as Y.Text).toString()
-                    )
+                    const was = (d.get("content") as Y.Text).toString(),
+                      now = (a!.get("content") as Y.Text).toString();
+                    if (now !== was) {
                       changed.push(id);
+                      beforeTexts.push(was);
+                      afterTexts.push(now);
+                    }
                   }
                 } finally {
                   candidate.destroy();
                 }
+                // Image links this person added count for the lesson's folder-only recipients
+                // only if this person could already see those images (Rooms.vouchAdded).
+                // Only live edits (subtype 2) vouch: a reconnecting client's SyncStep2 may
+                // replay text someone else typed, which this person didn't vouch for.
+                if (subtype === 2 && changed.length)
+                  rooms.vouchAdded(room, beforeTexts, afterTexts, {
+                    canSeeAll: () => canReadAccess(rights().workspace),
+                    userId: session?.user.id,
+                  });
                 Y.applyUpdate(room.doc, data, peer);
                 room.doc.transact(() => {
                   for (const id of changed)
@@ -441,7 +484,13 @@ export function setupWebsocket(
             null,
           );
           room.touched = Date.now();
-          if (!room.peers.size && room.dirty) rooms.save(room);
+          if (!room.peers.size && room.dirty)
+            try {
+              rooms.save(room);
+            } catch (error) {
+              // Still dirty and loaded: the checkpoint, sweep or unload saves it later.
+              console.error("Could not save a lesson after its last connection closed.", error);
+            }
         });
         const enc = encoding.createEncoder();
         encoding.writeVarUint(enc, 0);

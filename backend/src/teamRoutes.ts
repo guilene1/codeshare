@@ -112,7 +112,13 @@ export function teamRoutes(
   // Workspaces shared with a team: their live sessions are re-checked whenever membership
   // changes, so a removed member is disconnected and a new member reconnects with access.
   const sharedWorkspaces = (teamId: string) =>
-    (db.prepare("SELECT workspace_id FROM workspace_team_shares WHERE team_id=?").all(teamId) as { workspace_id: string }[]).map((r) => r.workspace_id);
+    (
+      db
+        .prepare(
+          "SELECT workspace_id FROM workspace_team_shares WHERE team_id=? UNION SELECT workspace_id FROM folder_team_shares WHERE team_id=?",
+        )
+        .all(teamId, teamId) as { workspace_id: string }[]
+    ).map((r) => r.workspace_id);
   const membershipChanged = (workspaceIds: string[]) => workspaceIds.forEach(revalidate);
   const membershipLimit = (userId: string) => {
     if (count("SELECT COUNT(*) AS n FROM team_members WHERE user_id=?", userId) >= MAX_TEAMS_PER_USER)

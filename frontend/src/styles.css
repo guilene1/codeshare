@@ -231,6 +231,37 @@
   color: var(--muted);
   overflow-wrap: anywhere;
 }
+/* Share Folder: grants inherited from parent folders are listed apart, read-only. */
+.people-list li > .role-badge {
+  flex: 0 0 auto;
+}
+.inherited-heading {
+  margin: 16px 0 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  color: var(--faint);
+}
+.people-list.inherited li {
+  opacity: 0.85;
+}
+.people-list .inherited-from {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 2px;
+  color: var(--faint);
+}
+/* Explorer: a subtle mark on folders shared on their own. */
+.folder-open .shared-mark {
+  display: inline-flex;
+  flex: none;
+  margin-left: auto;
+  padding-right: 2px;
+}
+.folder-open .shared-mark svg {
+  color: var(--faint);
+}
 @media (max-width: 650px) {
   .people-add {
     flex-wrap: wrap;
@@ -1698,6 +1729,25 @@ option {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* A shared folder's recipient: who shared it and their role, in place of the workspace root. */
+.course-root .shared-by {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 1;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 8px 5px;
+}
+.course-root .shared-by > svg {
+  flex: none;
+}
+.course-root .shared-by .role-badge {
+  flex: none;
+  font-size: 10px;
+  padding: 1px 7px;
 }
 .folder-row {
   display: flex;

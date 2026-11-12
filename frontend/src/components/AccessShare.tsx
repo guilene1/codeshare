@@ -353,6 +353,7 @@ export default function AccessShare({
   selfId,
   hasEditorLink,
   visibility,
+  sharedFolders = 0,
   onVisibilityChange,
   folderId,
   freshToken,
@@ -372,6 +373,9 @@ export default function AccessShare({
   hasEditorLink?: boolean;
   // General access: "link" lets students open the student link without signing in.
   visibility: "link" | "private";
+  // Folders shared on their own: while any exist the workspace must stay Restricted (the
+  // server refuses the switch too), so "Anyone with the link" is unavailable and explained.
+  sharedFolders?: number;
   onVisibilityChange: (visibility: "link" | "private") => void;
   folderId?: string | null;
   // A link created during this page session (memory only, never browser storage).
@@ -473,10 +477,19 @@ export default function AccessShare({
               onChange={(e) => void changeVisibility(e.target.value as "link" | "private")}
             >
               <option value="private">Restricted: only people with access</option>
-              <option value="link">Anyone with the link can view</option>
+              <option value="link" disabled={visibility === "private" && sharedFolders > 0}>
+                Anyone with the link can view
+              </option>
             </select>
           </label>
         ) : null}
+        {canShare && visibility === "private" && sharedFolders > 0 && (
+          <p className="fine-print folder-share-note">
+            {sharedFolders === 1 ? "A folder is shared on its own" : `${sharedFolders} folders are shared on their own`}, so
+            this workspace stays Restricted. Remove those folder shares (Share folder in the Explorer) before allowing
+            anyone with the link.
+          </p>
+        )}
         {accessError && (
           <p className="error" role="alert">
             {accessError}

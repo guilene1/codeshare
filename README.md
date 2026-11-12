@@ -121,6 +121,7 @@ PowerShell: set `$env:DEVSHARE_BASE_URL='http://localhost:8080'` or `$env:METRIC
 | `ALLOWED_ORIGINS` | Exact comma-separated browser origins; Compose uses `https://DOMAIN` |
 | `TRUST_PROXY` | Local `0`; Compose `1` for Caddy’s single hop |
 | `NODE_OPTIONS` | Compose sets `--max-old-space-size=384`; app container limited to 512 MiB |
+| `MAX_ACTIVE_LESSONS` | Lessons kept in memory at once, default `16` (whole numbers 1–256; anything else falls back to 16). At the limit, the least recently used lesson with no connections is saved and unloaded; if every lesson is in use, new ones are refused. `/api/metrics` reports `lessonEvictions`, `lessonEvictionFailures` and `lessonRefusals` |
 | `S3_BACKUP_BUCKET`, `S3_BACKUP_PREFIX`, `AWS_REGION` | Optional host backup configuration; app never requires S3 |
 | `AWS_PROFILE` / AWS CLI credentials | Host authentication only, never committed or embedded in images |
 | `COOKIE_SECURE` | Defaults to secure cookies when `NODE_ENV=production`; the local HTTP preview sets `0` |

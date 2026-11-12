@@ -93,6 +93,20 @@ export type SharedWorkspace = {
   ownerName: string;
 };
 export type ShareRole = SharedWorkspace["role"];
+// A folder shared on its own with the signed-in account (from /api/me/shared): only what a
+// folder-only recipient may know. Never the workspace's name, description or parent path.
+export type SharedFolder = {
+  folderId: string;
+  workspaceId: string;
+  name: string;
+  role: ShareRole;
+  ownerName: string;
+  sharedAt: number;
+  via: Array<{ kind: "direct" } | { kind: "team"; teamName: string }>;
+};
+// A shared folder's link: the workspace and folder IDs (opaque), nothing else.
+export const folderPath = (item: Pick<SharedFolder, "workspaceId" | "folderId">) =>
+  `/w/${item.workspaceId}?folder=${item.folderId}`;
 // v1 kept private editor shortcuts (including tokens) in localStorage. v2 only reads
 // them to offer a one-time import into the account, then deletes them.
 export type LegacyShortcut = { id: string; token: string; name: string };

@@ -6,11 +6,15 @@ import type { WebSocket } from "ws";
 import {
   canEditAccess,
   equalHash,
-  workspaceAccess,
+  folderScope,
+  lessonAccess,
   type Access,
   type Auth,
+  type ShareRole,
   type Visibility,
 } from "./access.js";
+import { imageIds, recordImageRefs, vouchImages } from "./database.js";
+import { imageInScope } from "./scope.js";
 import { blockFields, MAX_BLOCKS, orderedBlocks } from "./blocks.js";
 import { templates } from "./templates.js";
 
@@ -158,10 +162,20 @@ export const EDIT_WINDOW_MS = 10 * 60_000;
 export type Live = {
   workspaceId: string;
   room: Room;
+  // Rights in this socket's lesson (workspace access plus any folder grant on it).
   access: Access;
+  // Workspace-level rights alone: "none" for a folder-only recipient. Presence and activity
+  // are workspace-wide, so they follow this, never folder grants.
+  workspace: Access;
   userId?: string;
   name?: string;
+  // Folder-only recipients: the folders they reached when last told about the tree (IDs and
+  // roles). When a sharing or team change alters it, they're told to re-read their tree.
+  scopeKey?: string;
 };
+// A stable fingerprint of a folder scope: which folders, with which role (not their names).
+export const scopeKeyOf = (scope: Map<string, ShareRole>) =>
+  [...scope].map(([id, role]) => id + ":" + role).sort().join(",");
 export type PresenceSummary = {
   total: number;
   users: Array<{ name: string; role: Access; you: boolean }>;
@@ -183,9 +197,40 @@ export type Room = {
   edits: Map<string, { fileId: string; actor?: Actor }>;
   dirty: boolean;
   touched: number;
+  // Requests and connection upgrades still using this lesson (see Rooms.hold): a lesson with
+  // holds or connected peers is never unloaded.
+  holds: number;
   timer?: ReturnType<typeof setTimeout>;
   dispose?: () => void;
 };
+// How many lessons may be in memory at once: MAX_ACTIVE_LESSONS, 16 by default. Anything that
+// isn't a whole number from 1 to 256 is ignored (with a warning), so a typo can't remove the
+// limit or stop the server from starting.
+export const DEFAULT_LESSON_LIMIT = 16;
+export function lessonLimit(value: string | undefined) {
+  if (value === undefined || value.trim() === "") return DEFAULT_LESSON_LIMIT;
+  const n = Number(value);
+  if (/^\d+$/.test(value.trim()) && n >= 1 && n <= 256) return n;
+  console.warn(`MAX_ACTIVE_LESSONS must be a whole number from 1 to 256; using ${DEFAULT_LESSON_LIMIT}.`);
+  return DEFAULT_LESSON_LIMIT;
+}
+// Notices tell a client to re-read something over REST; they never carry the data itself.
+export type Notice = { tree: true } | { workspace: true } | { folderShares: true };
+// Everyone connected to a lesson receives that lesson's whole live document, so it holds only
+// the lesson's own files, code blocks and migration flags. Workspace-wide metadata (the
+// folder/file tree and the workspace name) is served over REST instead. Lessons saved by
+// earlier releases still carry both as the "catalog" and "workspace" maps: they're cleared on
+// load, Yjs garbage collection drops their contents, and the stored state loses them the next
+// time the lesson is saved. Clients can't write them back (see the WebSocket validator).
+export const LEGACY_METADATA_MAPS = ["catalog", "workspace"] as const;
+export function stripWorkspaceMetadata(doc: Y.Doc) {
+  doc.transact(() => {
+    for (const name of LEGACY_METADATA_MAPS) {
+      const map = doc.getMap(name);
+      for (const key of [...map.keys()]) map.delete(key);
+    }
+  });
+}
 export function validateDocument(doc: Y.Doc) {
   const docs = doc.getMap<Y.Map<unknown>>("documents");
   if (docs.size > 64) throw new Error("A lesson supports up to 64 files.");
@@ -258,12 +303,49 @@ export class Rooms {
   live = new Map<WebSocket, Live>();
   // Set by the WebSocket server: delivers a JSON message to one socket.
   sendJson?: (peer: WebSocket, payload: unknown) => void;
+  // Set by the WebSocket server: delivers a data-free notice (message type 5) to one socket.
+  sendNotice?: (peer: WebSocket, notice: Notice) => void;
   private presenceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // Lesson capacity counters (reported by /api/metrics).
+  capacity = { evictions: 0, refusals: 0, evictionFailures: 0 };
   constructor(
     public db: DatabaseSync,
     public checkpointMs = 1500,
-    public maxRooms = 16,
+    public maxRooms = DEFAULT_LESSON_LIMIT,
   ) {}
+  // Marks a lesson as in use by a request or a connection upgrade until the returned function
+  // is called (calling it again does nothing). Held lessons are never unloaded.
+  hold(room: Room) {
+    room.holds++;
+    let done = false;
+    return () => {
+      if (done) return;
+      done = true;
+      room.holds--;
+      room.touched = Date.now();
+    };
+  }
+  private idle(room: Room) {
+    return !room.peers.size && !room.holds;
+  }
+  // At the lesson limit: unloads the least recently used lesson that nobody is connected to and
+  // nothing is using, after saving it. A lesson whose save fails stays in memory, unchanged,
+  // and the next candidate is tried. Returns false when every lesson is in use.
+  private makeSpace() {
+    const candidates = [...this.active.values()].filter((r) => this.idle(r)).sort((a, b) => a.touched - b.touched);
+    for (const room of candidates) {
+      try {
+        this.release(room);
+        this.capacity.evictions++;
+        console.info(`Lesson capacity: unloaded the least recently used idle lesson (${this.active.size + 1}/${this.maxRooms} were loaded).`);
+        return true;
+      } catch (error) {
+        this.capacity.evictionFailures++;
+        console.error("Lesson capacity: an idle lesson could not be saved, so it stays loaded.", error);
+      }
+    }
+    return false;
+  }
   create(
     name: string,
     lang: string,
@@ -279,7 +361,6 @@ export class Rooms {
       now = Date.now(),
       doc = new Y.Doc();
     const room = this.make(id, name, doc);
-    doc.getMap("workspace").set("name", name);
     const names: Record<string, string> = {
       hcl: "main.tf",
       python: "main.py",
@@ -324,7 +405,6 @@ export class Rooms {
         visibility,
       );
     this.save(room);
-    this.syncCatalog(id);
     this.record(id, "workspace.created", name, actor);
     return room;
   }
@@ -335,10 +415,13 @@ export class Rooms {
     folderId: string | null = null,
   ) {
     const id = folderId ? workspaceId + ":" + folderId : workspaceId;
-    if (this.active.size >= this.maxRooms)
+    if (this.active.size >= this.maxRooms && !this.makeSpace()) {
+      this.capacity.refusals++;
+      console.warn(`Lesson capacity: refused to open a lesson; all ${this.maxRooms} loaded lessons are in use.`);
       throw new Error(
         "The server is at active lesson capacity. Try again shortly.",
       );
+    }
     const room: Room = {
       id,
       workspaceId,
@@ -352,6 +435,7 @@ export class Rooms {
       edits: new Map(),
       dirty: false,
       touched: Date.now(),
+      holds: 0,
     };
     room.awareness.setLocalState(null);
     doc.on("update", () => {
@@ -401,9 +485,11 @@ export class Rooms {
   }
   // Deny by default: only sockets tracked as Owner or Editor may receive presence,
   // activity or other viewers' awareness. Viewers and untracked sockets get none of it.
+  // Workspace-wide presence and activity: workspace Owners and Editors only. A folder-only
+  // recipient (even a folder Editor) and a workspace viewer never receive them.
   canSeePresence(peer: WebSocket) {
-    const access = this.live.get(peer)?.access;
-    return access === "owner" || access === "editor";
+    const live = this.live.get(peer);
+    return !!live && canEditAccess(live.workspace) && canEditAccess(live.access);
   }
   // Sends a new or refreshed content activity row to the workspace's Owners and Editors.
   private announce(workspaceId: string, action: string, id: string) {
@@ -505,7 +591,10 @@ export class Rooms {
   get(workspaceId: string, folderId: string | null = null) {
     const key = folderId ? workspaceId + ":" + folderId : workspaceId;
     const existing = this.active.get(key);
-    if (existing) return existing;
+    if (existing) {
+      existing.touched = Date.now();
+      return existing;
+    }
     const row = folderId
       ? this.db
           .prepare(
@@ -523,8 +612,7 @@ export class Rooms {
       if (file.get("position") === undefined) file.set("position", position);
       position++;
     }
-    doc.getMap("workspace").set("name", row.name);
-    doc.getMap("catalog").set("tree", this.tree(workspaceId));
+    stripWorkspaceMetadata(doc);
     return this.make(workspaceId, row.name as string, doc, folderId);
   }
   tree(workspaceId: string) {
@@ -540,11 +628,75 @@ export class Rooms {
       .all(workspaceId);
     return { folders, documents };
   }
-  syncCatalog(workspaceId: string) {
-    const tree = this.tree(workspaceId);
-    for (const room of this.active.values())
-      if (room.workspaceId === workspaceId)
-        room.doc.getMap("catalog").set("tree", tree);
+  // The workspace's folders or files changed (created, renamed, reordered, deleted): every
+  // connected socket of the workspace is told, and its client re-reads the tree over REST with
+  // its own credentials. The notice itself carries no workspace data.
+  // `affected` names the folders whose contents changed (null is the workspace root). Sockets
+  // with workspace access always hear it. A folder-only recipient hears it only when the
+  // change is inside their own folders, so the timing of notices reveals nothing about the
+  // rest of the workspace.
+  notifyTree(workspaceId: string, affected: (string | null)[]) {
+    this.sendTree(this.treeAudience(workspaceId, affected));
+  }
+  // Who hears about a tree change, worked out separately so a deletion can ask before the
+  // folders (and their shares) are gone: workspace members always, a folder-only recipient
+  // only when an affected folder is inside their scope.
+  treeAudience(workspaceId: string, affected: (string | null)[]) {
+    const audience = new Set<WebSocket>();
+    const scopes = new Map<string, Map<string, ShareRole>>();
+    for (const [peer, live] of this.live) {
+      if (live.workspaceId !== workspaceId) continue;
+      if (live.workspace !== "none") {
+        audience.add(peer);
+        continue;
+      }
+      if (!live.userId) continue;
+      if (!scopes.has(live.userId)) scopes.set(live.userId, folderScope(this.db, workspaceId, live.userId));
+      if (affected.some((folder) => folder !== null && scopes.get(live.userId!)!.has(folder))) audience.add(peer);
+    }
+    return audience;
+  }
+  sendTree(audience: Iterable<WebSocket>) {
+    if (!this.sendNotice) return;
+    for (const peer of audience) {
+      const live = this.live.get(peer);
+      if (!live) continue;
+      // Remember what a folder-only recipient was last told about, so only changes of their
+      // own scope (never anyone else's sharing) lead to a later notice from revalidate().
+      if (live.workspace === "none" && live.userId)
+        live.scopeKey = scopeKeyOf(folderScope(this.db, live.workspaceId, live.userId));
+      this.sendNotice(peer, { tree: true });
+    }
+  }
+  notifyWorkspace(workspaceId: string, notice: Notice) {
+    if (!this.sendNotice) return;
+    for (const [peer, live] of this.live)
+      if (live.workspaceId === workspaceId) {
+        // Folder-only recipients never see the workspace name, so they aren't told it changed.
+        if ("workspace" in notice && live.workspace === "none") continue;
+        this.sendNotice(peer, notice);
+      }
+  }
+  // Folder shares changed (added, re-roled, removed, or a team holding one was deleted): the
+  // people who manage sharing re-read which folders are shared, so the Explorer marks in all
+  // their open tabs stay current. Only current managers hear it, by the same rule as
+  // res.locals.canShare (the owner, or a signed-in account with a direct workspace Editor
+  // share). Folder recipients, Viewers, team-derived Editors and Edit Link guests never do.
+  notifySharing(workspaceId: string) {
+    if (!this.sendNotice) return;
+    const direct = this.db.prepare(
+      "SELECT role FROM workspace_shares WHERE workspace_id=? AND user_id=?",
+    );
+    for (const [peer, live] of this.live) {
+      if (live.workspaceId !== workspaceId || !live.userId) continue;
+      // A socket being closed by revalidate() (its rights changed) hears nothing more.
+      if (peer.readyState !== peer.OPEN) continue;
+      const manager =
+        live.workspace === "owner" ||
+        (live.workspace === "editor" &&
+          direct.get(workspaceId, live.userId)?.role === "editor");
+      if (manager) this.sendNotice(peer, { folderShares: true });
+    }
   }
   // Closes live sockets whose credentials match (after sign-out, link revocation, deletion).
   disconnect(match: (auth: Auth) => boolean, reason: string) {
@@ -559,13 +711,51 @@ export class Rooms {
     sessionValid: (tokenHash: string, userId: string) => boolean,
     reason: string,
   ) {
-    for (const [peer, auth] of this.connections)
-      if (
-        auth.workspaceId === workspaceId &&
-        workspaceAccess(this.db, sessionValid, workspaceId, auth) !==
-          this.live.get(peer)?.access
-      )
+    const retold: WebSocket[] = [];
+    for (const [peer, auth] of this.connections) {
+      if (auth.workspaceId !== workspaceId) continue;
+      const live = this.live.get(peer);
+      // Compared per lesson (folder grants count there) and at workspace level (presence).
+      const now = lessonAccess(this.db, sessionValid, workspaceId, live?.room.folderId ?? null, auth);
+      if (now.access !== live?.access || now.workspace !== live?.workspace) {
         peer.close(1008, reason);
+        continue;
+      }
+      // Still connected, but a folder-only recipient may have gained or lost other folders
+      // (a share or team change): their own tree is out of date, so they re-read it. Nobody
+      // else is told anything, so sharing changes elsewhere stay invisible.
+      if (live.workspace === "none" && live.userId) {
+        const key = scopeKeyOf(folderScope(this.db, workspaceId, live.userId));
+        if (key !== live.scopeKey) retold.push(peer);
+      }
+    }
+    this.sendTree(retold);
+  }
+  // Image provenance. A link typed into a document proves nothing: anyone can paste an image
+  // ID. A reference newly added to a lesson is vouched for (and so becomes visible to that
+  // lesson's folder-only recipients) only when the person who added it could already see that
+  // image: anyone with workspace read access, or a folder-only recipient for whom the same
+  // image is already vouched inside their own folders. Anything else stays unvouched, so it
+  // grants nobody new access. `canSeeAll` tells whether the actor has workspace read access;
+  // it's asked only when an image link was really added (not on every keystroke).
+  vouchAdded(
+    room: Room,
+    before: string[],
+    after: string[],
+    actor: { canSeeAll: () => boolean; userId?: string },
+  ) {
+    const existing = imageIds(room.workspaceId, before);
+    const added = [...imageIds(room.workspaceId, after)].filter((id) => !existing.has(id));
+    if (!added.length) return;
+    const all = actor.canSeeAll();
+    let scope: Map<string, ShareRole> | undefined;
+    const visible = added.filter((id) => {
+      if (all) return true;
+      if (!actor.userId) return false;
+      scope ??= folderScope(this.db, room.workspaceId, actor.userId);
+      return imageInScope(this.db, room.workspaceId, id, scope);
+    });
+    if (visible.length) vouchImages(this.db, room.workspaceId, room.folderId, visible);
   }
   canEditHash(id: string, supplied: string | undefined) {
     if (!supplied) return false;
@@ -643,6 +833,13 @@ export class Rooms {
           block.updated_at,
           room.folderId,
         );
+      // Which images this lesson's documents use (folder-scoped image access).
+      recordImageRefs(
+        this.db,
+        room.workspaceId,
+        room.folderId,
+        [...docs.values()].map((d) => (d.get("content") as Y.Text).toString()),
+      );
       this.db.exec("COMMIT");
       room.dirty = false;
       this.flushEdits(room);
@@ -661,18 +858,26 @@ export class Rooms {
           .run(now, room.workspaceId);
         continue;
       }
-      if (now - room.touched > 30_000) {
-        this.release(room);
+      if (now - room.touched > 30_000 && !room.holds) {
+        try {
+          this.release(room);
+        } catch (error) {
+          // Kept in memory (still dirty); the next sweep tries again.
+          console.error("Could not save an idle lesson; it stays loaded.", error);
+        }
       }
     }
   }
+  // Saves a lesson (when it has unsaved changes) and frees it. If the save fails nothing is
+  // freed: the lesson, its changes and its pending checkpoint stay as they were.
   release(room: Room) {
-    if (room.timer) clearTimeout(room.timer);
     if (room.dirty) this.save(room);
     else
       this.db
         .prepare("UPDATE rooms SET last_activity=? WHERE id=?")
         .run(room.touched, room.workspaceId);
+    if (room.timer) clearTimeout(room.timer);
+    room.timer = undefined;
     room.dispose?.();
     room.awareness.destroy();
     room.awarenessOwners.clear();
@@ -685,7 +890,12 @@ export class Rooms {
     for (const room of this.active.values()) {
       for (const peer of room.peers.keys())
         peer.close(1001, "Server restarting");
-      this.release(room);
+      try {
+        this.release(room);
+      } catch (error) {
+        // One lesson that can't be saved must not keep the others from being saved.
+        console.error("Could not save a lesson while shutting down.", error);
+      }
     }
     this.db.close();
   }

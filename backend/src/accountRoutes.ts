@@ -330,8 +330,55 @@ export function accountRoutes(
           role: row.role,
           ownerName: row.owner_name ?? "",
         })),
+      folders: sharedFolders(session.user.id),
     });
   });
+  // Folders shared on their own with this account, directly or through one of its teams. Each
+  // entry tells only what a folder-only recipient may know: the folder's name, the role, the
+  // owner's name and how it was shared. Never the workspace's name or description, the
+  // folder's parent path, or anything (such as update times) about the rest of the workspace.
+  // The workspace ID is included so the folder can be opened; it reveals nothing on its own.
+  const sharedFolders = (userId: string) => {
+    const rows = rooms.db
+      .prepare(
+        `SELECT s.folder_id AS folderId, s.workspace_id AS workspaceId, f.name, s.role, s.created_at AS sharedAt,
+                u.display_name AS ownerName, NULL AS teamName
+           FROM folder_shares s JOIN folders f ON f.id=s.folder_id JOIN rooms r ON r.id=s.workspace_id
+           LEFT JOIN users u ON u.id=r.owner_id
+          WHERE s.user_id=?
+         UNION ALL
+         SELECT s.folder_id, s.workspace_id, f.name, s.role, s.created_at, u.display_name, t.name
+           FROM folder_team_shares s JOIN team_members m ON m.team_id=s.team_id AND m.user_id=?
+           JOIN teams t ON t.id=s.team_id JOIN folders f ON f.id=s.folder_id JOIN rooms r ON r.id=s.workspace_id
+           LEFT JOIN users u ON u.id=r.owner_id
+         ORDER BY 5 DESC`,
+      )
+      .all(userId, userId) as {
+      folderId: string;
+      workspaceId: string;
+      name: string;
+      role: "viewer" | "editor";
+      sharedAt: number;
+      ownerName: string | null;
+      teamName: string | null;
+    }[];
+    // One entry per folder: the highest role wins, and every way it was shared is listed.
+    const folders = new Map<string, {
+      folderId: string; workspaceId: string; name: string; role: "viewer" | "editor"; ownerName: string;
+      sharedAt: number; via: ({ kind: "direct" } | { kind: "team"; teamName: string })[];
+    }>();
+    for (const row of rows) {
+      const entry = folders.get(row.folderId) ?? {
+        folderId: row.folderId, workspaceId: row.workspaceId, name: row.name, role: row.role,
+        ownerName: row.ownerName ?? "", sharedAt: row.sharedAt, via: [],
+      };
+      if (row.role === "editor") entry.role = "editor";
+      entry.sharedAt = Math.max(entry.sharedAt, row.sharedAt);
+      entry.via.push(row.teamName === null ? { kind: "direct" } : { kind: "team", teamName: row.teamName });
+      folders.set(row.folderId, entry);
+    }
+    return [...folders.values()];
+  };
   // A recipient can remove a shared workspace from their own list.
   app.delete("/api/me/shared/:workspaceId", requireSession, (req, res) => {
     const session = res.locals.session as Session;

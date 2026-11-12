@@ -9,7 +9,10 @@ import {
   FolderOpen,
   FolderPlus,
   Pencil,
+  Share2,
   Trash2,
+  UserRound,
+  Users,
   X,
 } from "lucide-react";
 import Modal from "./Modal";
@@ -18,12 +21,22 @@ import type { CourseTree } from "../lib";
 type Props = {
   tree: CourseTree;
   name: string;
+  // Set for a folder-only recipient: their tree starts at the folders shared with them (the
+  // server sends nothing above them), so there is no workspace root to show or open.
+  shared?: { ownerName: string; role: "viewer" | "editor" };
   folder: string | null;
   active: string | undefined;
   // Files open as tabs in the current lesson; each gets a close X in its row.
   openTabs: string[];
   onCloseTab: (file: string) => void;
-  canEdit: boolean;
+  // Whether folders may be created inside `parent` (null: the workspace root), and so
+  // renamed, moved or deleted there: the server needs Editor rights on the parent.
+  canOrganize: (parent: string | null) => boolean;
+  // Workspace sharing managers only (owner, direct Editors): opens Share folder. Absent for
+  // everyone else, so the menu item doesn't exist for them.
+  onShare?: (folder: { id: string; name: string }) => void;
+  // Folders shared on their own (direct shares), marked subtly. Managers only.
+  sharedFolders?: Set<string>;
   connected: boolean;
   onOpen: (folder: string | null, file?: string) => void;
   request: (path: string, method: string, body?: unknown) => Promise<unknown>;
@@ -31,15 +44,21 @@ type Props = {
 export default function CourseExplorer({
   tree,
   name,
+  shared,
   folder,
   active,
   openTabs,
   onCloseTab,
-  canEdit,
+  canOrganize,
+  onShare,
+  sharedFolders,
   connected,
   onOpen,
   request,
 }: Props) {
+  const parentOf = (id: string | null) => tree.folders.find((f) => f.id === id)?.parent_id ?? null;
+  // A folder's own entry (rename, move, delete) is managed from its parent.
+  const canManage = (id: string) => canOrganize(parentOf(id));
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [menu, setMenu] = useState<string | null>(null);
   const [dialog, setDialog] = useState<"new" | "rename" | "delete" | null>(
@@ -50,7 +69,7 @@ export default function CourseExplorer({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   function open(mode: "new" | "rename" | "delete", id: string | null) {
-    if (!canEdit) return;
+    if (mode === "new" ? !canOrganize(id) : !id || !canManage(id)) return;
     setMenu(null);
     setDialog(mode);
     setTarget(id);
@@ -63,7 +82,7 @@ export default function CourseExplorer({
   }
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (busy || !canEdit || !connected) return;
+    if (busy || !connected) return;
     setBusy(true);
     setError("");
     try {
@@ -72,7 +91,9 @@ export default function CourseExplorer({
       else if (dialog === "rename")
         await request("/folders/" + target, "PATCH", { name: draft });
       else await request("/folders/" + target, "DELETE");
-      if (dialog === "delete" && target === folder) onOpen(null);
+      // A shared-folder recipient has no root to fall back to: its parent (always inside
+      // their folders, since the shared folder itself can't be deleted by them) instead.
+      if (dialog === "delete" && target === folder) onOpen(shared ? parentOf(target) : null);
       if (target)
         setCollapsed((previous) => {
           const next = new Set(previous);
@@ -87,7 +108,7 @@ export default function CourseExplorer({
     }
   }
   async function move(id: string, direction: number) {
-    if (!canEdit || !connected || busy) return;
+    if (!canManage(id) || !connected || busy) return;
     setMenu(null);
     const item = tree.folders.find((f) => f.id === id)!;
     const siblings = tree.folders.filter((f) => f.parent_id === item.parent_id);
@@ -151,8 +172,13 @@ export default function CourseExplorer({
                     <Folder size={15} />
                   )}
                   <span title={item.name}>{item.name}</span>
+                  {sharedFolders?.has(item.id) && (
+                    <span className="shared-mark" role="img" aria-label="Shared folder" title="Shared folder">
+                      <Users size={12} aria-hidden="true" />
+                    </span>
+                  )}
                 </button>
-                {canEdit && (
+                {(canOrganize(item.id) || canManage(item.id) || onShare) && (
                   <details className="folder-menu" open={menu === item.id}>
                     <summary
                       aria-label={"Manage folder " + item.name}
@@ -167,38 +193,55 @@ export default function CourseExplorer({
                       ⋯
                     </summary>
                     <div>
-                      <button
-                        onClick={() => open("new", item.id)}
-                        disabled={!connected || busy}
-                      >
-                        <FolderPlus size={12} /> New subfolder
-                      </button>
-                      <button
-                        onClick={() => open("rename", item.id)}
-                        disabled={!connected || busy}
-                      >
-                        <Pencil size={12} /> Rename
-                      </button>
-                      <button
-                        onClick={() => void move(item.id, -1)}
-                        disabled={!connected || busy || index === 0}
-                      >
-                        <ArrowUp size={12} /> Move up
-                      </button>
-                      <button
-                        onClick={() => void move(item.id, 1)}
-                        disabled={
-                          !connected || busy || index === siblings.length - 1
-                        }
-                      >
-                        <ArrowDown size={12} /> Move down
-                      </button>
-                      <button
-                        onClick={() => open("delete", item.id)}
-                        disabled={!connected || busy}
-                      >
-                        <Trash2 size={12} /> Delete
-                      </button>
+                      {onShare && (
+                        <button
+                          onClick={() => {
+                            setMenu(null);
+                            onShare({ id: item.id, name: item.name });
+                          }}
+                        >
+                          <Share2 size={12} /> Share folder
+                        </button>
+                      )}
+                      {canOrganize(item.id) && (
+                        <button
+                          onClick={() => open("new", item.id)}
+                          disabled={!connected || busy}
+                        >
+                          <FolderPlus size={12} /> New subfolder
+                        </button>
+                      )}
+                      {/* The folder's own entry: not for the shared folder itself. */}
+                      {canManage(item.id) && (
+                        <>
+                          <button
+                            onClick={() => open("rename", item.id)}
+                            disabled={!connected || busy}
+                          >
+                            <Pencil size={12} /> Rename
+                          </button>
+                          <button
+                            onClick={() => void move(item.id, -1)}
+                            disabled={!connected || busy || index === 0}
+                          >
+                            <ArrowUp size={12} /> Move up
+                          </button>
+                          <button
+                            onClick={() => void move(item.id, 1)}
+                            disabled={
+                              !connected || busy || index === siblings.length - 1
+                            }
+                          >
+                            <ArrowDown size={12} /> Move down
+                          </button>
+                          <button
+                            onClick={() => open("delete", item.id)}
+                            disabled={!connected || busy}
+                          >
+                            <Trash2 size={12} /> Delete
+                          </button>
+                        </>
+                      )}
                     </div>
                   </details>
                 )}
@@ -244,11 +287,24 @@ export default function CourseExplorer({
   return (
     <div className="course-explorer">
       <div className="course-root">
-        <button onClick={() => onOpen(null)} title="Open workspace root">
-          <FolderOpen size={15} />
-          <span>{name}</span>
-        </button>
-        {canEdit && (
+        {shared ? (
+          // Who shared it and the role here, in place of the workspace root.
+          <span className="shared-by" aria-label="Shared folder details">
+            <UserRound size={14} />
+            <span title={shared.ownerName ? "Shared by " + shared.ownerName : undefined}>
+              {shared.ownerName ? "Shared by " + shared.ownerName : "Shared with you"}
+            </span>
+            <span className={"role-badge " + shared.role}>
+              {shared.role === "editor" ? "Editor" : "Viewer"}
+            </span>
+          </span>
+        ) : (
+          <button onClick={() => onOpen(null)} title="Open workspace root">
+            <FolderOpen size={15} />
+            <span>{name}</span>
+          </button>
+        )}
+        {canOrganize(folder) && (
           <button
             className="icon-button"
             aria-label="Create folder"
@@ -266,7 +322,7 @@ export default function CourseExplorer({
         </p>
       )}
       {branch(null)}
-      {dialog && canEdit && (
+      {dialog && (
         <Modal
           title={
             dialog === "new"

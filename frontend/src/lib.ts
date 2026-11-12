@@ -152,9 +152,10 @@ export async function api<T = { ok: boolean }>(
   return result;
 }
 export type UploadedImage = { id: string; mime: string; width: number; height: number };
-// Sends an image's original bytes unchanged (never resized or re-encoded).
-export async function uploadImage(workspaceId: string, file: Blob, editorToken?: string) {
-  const response = await fetch(`/api/rooms/${workspaceId}/images`, {
+// Sends an image's original bytes unchanged (never resized or re-encoded), into the lesson it
+// is added to (folder, or the workspace root): folder Editors may upload only into their own.
+export async function uploadImage(workspaceId: string, file: Blob, editorToken?: string, folder?: string | null) {
+  const response = await fetch(`/api/rooms/${workspaceId}/images${folder ? "?folder=" + encodeURIComponent(folder) : ""}`, {
     method: "POST",
     credentials: "same-origin",
     headers: {

@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { openDatabase } from "./database.js";
+import { openDatabase, vouchImages } from "./database.js";
 import {
   Rooms,
   CONTENT_ACTIONS,
@@ -15,6 +15,7 @@ import {
   fileTooLarge,
   filename,
   language,
+  lessonLimit,
   MAX_CONTENT,
   MAX_DOCUMENT,
   normalizeNewlines,
@@ -29,12 +30,19 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 import {
   canEditAccess,
   canReadAccess,
+  folderRole,
+  folderScope,
   hashEditorToken,
+  higherAccess,
   isShareRole,
   isVisibility,
   TOKEN_PATTERN,
   workspaceAccess,
+  type Access,
+  type ShareRole,
 } from "./access.js";
+import { classify, imageInScope, scopedInfo, scopedTree } from "./scope.js";
+import { FolderSharing } from "./folderSharing.js";
 import {
   Accounts,
   csrfFor,
@@ -71,6 +79,8 @@ export function createApp(
     dbPath?: string;
     origins?: string[];
     checkpointMs?: number;
+    // Lessons kept in memory at once (default: MAX_ACTIVE_LESSONS, else 16).
+    maxLessons?: number;
     staticPath?: string;
     cookieSecure?: boolean;
     authLimits?: Partial<AuthLimits>;
@@ -87,6 +97,7 @@ export function createApp(
   const rooms = new Rooms(
     openDatabase(dbPath),
     options.checkpointMs,
+    options.maxLessons ?? lessonLimit(process.env.MAX_ACTIVE_LESSONS),
   );
   const images = new Images(rooms.db);
   const links = new LinkVault(dbPath);
@@ -243,6 +254,12 @@ export function createApp(
       memory: process.memoryUsage(),
       cpuMicroseconds: process.cpuUsage(),
       activeSessions: rooms.active.size,
+      // Lesson capacity: the limit, idle lessons unloaded to make space, failed unloads
+      // (a save error; the lesson stays loaded) and lessons refused because all were in use.
+      lessonLimit: rooms.maxRooms,
+      lessonEvictions: rooms.capacity.evictions,
+      lessonEvictionFailures: rooms.capacity.evictionFailures,
+      lessonRefusals: rooms.capacity.refusals,
       websocketConnections: [...rooms.active.values()].reduce(
         (sum, session) => sum + session.peers.size,
         0,
@@ -261,13 +278,26 @@ export function createApp(
     ...authLimits(),
     ...options.authLimits,
   });
-  teamRoutes(app, rooms.db, (workspaceId) =>
+  teamRoutes(app, rooms.db, (workspaceId) => {
     rooms.revalidate(
       workspaceId,
       (hash, user) => accounts.sessionValid(hash, user),
       "Your access to this workspace changed. Refresh to continue.",
-    ),
-  );
+    );
+    // A deleted team takes its folder shares with it; managers' Explorer marks follow.
+    rooms.notifySharing(workspaceId);
+  });
+  // Folder shares (accounts and teams). Every change re-checks that workspace's live sockets,
+  // so a revoked folder closes at once while other grants keep their sessions, then tells the
+  // workspace's sharing managers (only them) to re-read which folders are shared.
+  const folderSharing = new FolderSharing(rooms.db, (workspaceId) => {
+    rooms.revalidate(
+      workspaceId,
+      (hash, user) => accounts.sessionValid(hash, user),
+      "Your access to this folder changed. Refresh to continue.",
+    );
+    rooms.notifySharing(workspaceId);
+  });
   app.post(
     "/api/rooms",
     rateLimit({
@@ -340,18 +370,46 @@ export function createApp(
         : undefined;
     const linkValid = rooms.canEditHash(room.id as string, tokenHash);
     const session = res.locals.session as Session | undefined;
+    const workspaceId = room.id as string;
     // An invalid or revoked link grants nothing, so access is the same with or without it.
-    const access = workspaceAccess(
+    const workspace = workspaceAccess(
       rooms.db,
       (hash, user) => accounts.sessionValid(hash, user),
-      room.id as string,
+      workspaceId,
       { userId: session?.user.id, sessionHash: session?.tokenHash, tokenHash },
     );
-    // No access at all (a private workspace and no grant): the same 404 as a workspace that
-    // doesn't exist, so neither its existence nor its name is revealed. This gate covers
-    // every /api/rooms/:roomId route (content, files, images, tree, blocks, sharing). It runs
+    // Folder grants (account or team) add rights inside the shared folders only, for a
+    // signed-in account whose workspace access doesn't already include editing.
+    const folderGrant = (folderId: string | null): Access =>
+      folderId && session && !canEditAccess(workspace)
+        ? (folderRole(rooms.db, workspaceId, folderId, session.user.id) ?? "none")
+        : "none";
+    let scope: Map<string, ShareRole> | undefined;
+    const folderScopeOf = () =>
+      (scope ??= session && !canReadAccess(workspace) ? folderScope(rooms.db, workspaceId, session.user.id) : new Map());
+    // What this request touches decides which grants count (see scope.ts).
+    const target = classify(rooms.db, workspaceId, req.method, req.path, req.query, req.body);
+    let access: Access = workspace,
+      readable = canReadAccess(workspace);
+    if (target.kind === "lesson" || target.kind === "upload") {
+      access = higherAccess(workspace, folderGrant(target.folderId));
+      readable = canReadAccess(access);
+    } else if (target.kind === "manage") {
+      // Editing needs rights on the parent lesson; seeing the folder at all needs rights on
+      // the folder (or its parent, when creating or reordering).
+      access = higherAccess(workspace, folderGrant(target.parentId));
+      readable = canReadAccess(higherAccess(access, folderGrant(target.folderId)));
+    } else if (target.kind === "image" && !readable) {
+      readable = imageInScope(rooms.db, workspaceId, target.imageId, folderScopeOf());
+      if (readable) access = "viewer";
+    } else if ((target.kind === "info" || target.kind === "tree" || target.kind === "roles") && !readable)
+      readable = folderScopeOf().size > 0;
+    // No access at all (a private workspace and no grant, or a folder-only recipient asking
+    // for anything outside their folders): the same 404 as a workspace that doesn't exist,
+    // so neither its existence nor its name is revealed. This gate covers every
+    // /api/rooms/:roomId route (content, files, images, tree, blocks, sharing). It runs
     // before the link check: a fake or revoked link must not tell "private" from "missing".
-    if (!canReadAccess(access)) {
+    if (!readable) {
       res.status(404).json({ error: notFound });
       return;
     }
@@ -363,7 +421,23 @@ export function createApp(
       });
       return;
     }
+    // Folder-only recipients: their own view of the workspace, nothing beyond their folders.
+    if (!canReadAccess(workspace) && (target.kind === "info" || target.kind === "tree")) {
+      res.json(
+        target.kind === "info"
+          ? scopedInfo(rooms.db, workspaceId, folderScopeOf())
+          : scopedTree(rooms.db, workspaceId, folderScopeOf()),
+      );
+      return;
+    }
+    // The shared folder itself can't be renamed, reordered or deleted by its recipients.
+    if (target.kind === "manage" && target.folderId && !canEditAccess(access) && canEditAccess(folderGrant(target.folderId))) {
+      res.status(403).json({ error: "A shared folder itself can't be renamed, moved or deleted by the people it's shared with." });
+      return;
+    }
     res.locals.access = access;
+    // Workspace-level rights alone (folder grants never manage, share or see presence).
+    res.locals.workspaceAccess = workspace;
     res.locals.linkValid = linkValid;
     res.locals.canEdit = canEditAccess(access);
     // Who a change is attributed to: the verified account, else a private-link guest.
@@ -374,7 +448,7 @@ export function createApp(
         : undefined;
     // Owners manage their workspace; unclaimed legacy workspaces keep v1 link management.
     res.locals.canManage =
-      access === "owner" || (access === "editor" && !room.owner_id);
+      workspace === "owner" || (workspace === "editor" && !room.owner_id);
     // Read on every request, so a removed or downgraded share loses sharing at once.
     const share = session
       ? rooms.db
@@ -387,7 +461,7 @@ export function createApp(
     // Sharing (Edit Link and account shares): the owner and signed-in editor shares.
     // Edit Link guests, viewer shares and students never manage sharing.
     res.locals.canShare =
-      access === "owner" || (access === "editor" && share?.role === "editor");
+      workspace === "owner" || (workspace === "editor" && share?.role === "editor");
     next();
   });
   app.get("/api/rooms/:roomId", (_req, res) => {
@@ -407,6 +481,15 @@ export function createApp(
       ...(res.locals.canShare
         ? { hasEditorLink: !!room.has_editor_link }
         : {}),
+    });
+  });
+  // The caller's own folder grants in this workspace (each granted folder and everything inside
+  // it, with the best role), so the interface can offer editing exactly where the server allows
+  // it. Opaque folder IDs only; empty without a signed-in account or folder grants.
+  app.get("/api/rooms/:roomId/folder-roles", (_req, res) => {
+    const session = res.locals.session as Session | undefined;
+    res.json({
+      roles: session ? Object.fromEntries(folderScope(rooms.db, res.locals.workspace.id, session.user.id)) : {},
     });
   });
   app.get("/api/rooms/:roomId/summary", (_req, res) => {
@@ -584,6 +667,14 @@ export function createApp(
     if (!isVisibility(visibility))
       throw new Error("Choose who can open this workspace.");
     const id = res.locals.workspace.id;
+    // "Anyone with the link" would open every folder of the workspace, so it waits until no
+    // folder is shared on its own (a database trigger enforces the same).
+    if (visibility === "link" && folderSharing.hasShares(id)) {
+      res.status(409).json({
+        error: "Some folders in this workspace are shared on their own. Remove those folder shares before allowing anyone with the link.",
+      });
+      return;
+    }
     const changed = rooms.db
       .prepare("UPDATE rooms SET visibility=? WHERE id=? AND visibility<>?")
       .run(visibility, id, visibility).changes;
@@ -818,6 +909,118 @@ export function createApp(
     }
     res.json({ teamShares: teamShareList(id) });
   });
+  // Folder sharing: one folder (and everything inside it) shared with accounts or teams, as
+  // Viewer or Editor, in Restricted workspaces only. Managed by the workspace owner and by
+  // people with a direct Editor share of the workspace (canShare). Team-derived Editors, Edit
+  // Link guests, workspace Viewers and folder-only recipients never manage it: workspace
+  // members get 403, and folder-only recipients the same 404 as a missing workspace (the
+  // access gate treats every route here as workspace-level, see scope.ts).
+  const FOLDER_ID = /^[\w-]{36}$/;
+  const folderShareChanges = rateLimit({
+    windowMs: 10 * 60_000,
+    limit: 60,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+    message: { error: "Too many sharing changes. Wait a few minutes and try again." },
+  });
+  app.use(["/api/rooms/:roomId/folder-shares", "/api/rooms/:roomId/folders/:folderId/shares", "/api/rooms/:roomId/folders/:folderId/team-shares"], (req, res, next) => {
+    if (!res.locals.canShare) {
+      res.status(403).json({ error: "Only the workspace owner and editors can manage folder sharing." });
+      return;
+    }
+    const folderId = (req.params as Record<string, string | undefined>).folderId;
+    if (folderId !== undefined && !FOLDER_ID.test(folderId)) {
+      res.status(404).json({ error: "Folder not found." });
+      return;
+    }
+    if (req.method !== "GET") folderShareChanges(req, res, next);
+    else next();
+  });
+  // Runs a sharing change; refusals keep their status, and an inherited share says where it
+  // comes from (inheritedFrom), so a client can point to the parent folder.
+  const folderShareCall = (req: express.Request, res: express.Response, change: () => number | void) => {
+    try {
+      const status = change();
+      res.status(typeof status === "number" ? status : 200).json(
+        folderSharing.list(res.locals.workspace.id, req.params.folderId as string),
+      );
+    } catch (error) {
+      const e = error as Error & { status?: number; inheritedFrom?: unknown };
+      if (!e.status) throw error;
+      res.status(e.status).json({ error: e.message, ...(e.inheritedFrom ? { inheritedFrom: e.inheritedFrom } : {}) });
+    }
+  };
+  const folderName = (workspaceId: string, folderId: string) =>
+    String(rooms.db.prepare("SELECT name FROM folders WHERE id=? AND workspace_id=?").get(folderId, workspaceId)?.name ?? "A folder");
+  app.get("/api/rooms/:roomId/folder-shares", (_req, res) => {
+    res.json({ folders: folderSharing.overview(res.locals.workspace.id) });
+  });
+  app.get("/api/rooms/:roomId/folders/:folderId/shares", (req, res) =>
+    folderShareCall(req, res, () => undefined),
+  );
+  app.post("/api/rooms/:roomId/folders/:folderId/shares", (req, res) =>
+    folderShareCall(req, res, () => {
+      const session = res.locals.session as Session;
+      const id = res.locals.workspace.id as string, folderId = req.params.folderId as string;
+      const email = validEmail(req.body?.email);
+      const role = req.body?.role ?? "viewer";
+      const user = rooms.db.prepare("SELECT id,display_name FROM users WHERE email=?").get(email);
+      if (!user)
+        throw Object.assign(new Error("No Kodelumi account uses that email. Folders can be shared only with Kodelumi accounts."), { status: 404 });
+      const existed = folderSharing.shareWithUser(id, folderId, user.id as string, role, session.user.id);
+      rooms.record(id, existed ? "folder.share.changed" : "folder.share.added", `${folderName(id, folderId)}: ${user.display_name} (${role})`, res.locals.actor);
+      return existed ? 200 : 201;
+    }),
+  );
+  app.patch("/api/rooms/:roomId/folders/:folderId/shares/:userId", (req, res) =>
+    folderShareCall(req, res, () => {
+      const id = res.locals.workspace.id as string, folderId = req.params.folderId as string;
+      folderSharing.updateUser(id, folderId, req.params.userId as string, req.body?.role);
+      rooms.record(id, "folder.share.changed", `${folderName(id, folderId)}: ${userName(req.params.userId as string)} (${req.body.role})`, res.locals.actor);
+    }),
+  );
+  app.delete("/api/rooms/:roomId/folders/:folderId/shares/:userId", (req, res) =>
+    folderShareCall(req, res, () => {
+      const id = res.locals.workspace.id as string, folderId = req.params.folderId as string;
+      folderSharing.revokeUser(id, folderId, req.params.userId as string);
+      rooms.record(id, "folder.share.removed", `${folderName(id, folderId)}: ${userName(req.params.userId as string)}`, res.locals.actor);
+    }),
+  );
+  app.post("/api/rooms/:roomId/folders/:folderId/team-shares", (req, res) =>
+    folderShareCall(req, res, () => {
+      const session = res.locals.session as Session;
+      const id = res.locals.workspace.id as string, folderId = req.params.folderId as string;
+      const teamId = String(req.body?.teamId ?? "");
+      const role = req.body?.role ?? "viewer";
+      // Only teams the person sharing belongs to (the same 404 for teams that don't exist).
+      const team = TEAM_ID.test(teamId)
+        ? rooms.db
+            .prepare("SELECT t.name FROM team_members m JOIN teams t ON t.id=m.team_id WHERE m.team_id=? AND m.user_id=?")
+            .get(teamId, session.user.id)
+        : undefined;
+      if (!team) throw Object.assign(new Error("Choose one of your teams."), { status: 404 });
+      const existed = folderSharing.shareWithTeam(id, folderId, teamId, role, session.user.id);
+      rooms.record(id, existed ? "folder.team.changed" : "folder.team.shared", `${folderName(id, folderId)}: ${team.name} (${role})`, res.locals.actor);
+      return existed ? 200 : 201;
+    }),
+  );
+  app.patch("/api/rooms/:roomId/folders/:folderId/team-shares/:teamId", (req, res) =>
+    folderShareCall(req, res, () => {
+      const id = res.locals.workspace.id as string, folderId = req.params.folderId as string, teamId = String(req.params.teamId);
+      folderSharing.updateTeam(id, folderId, teamId, req.body?.role);
+      const name = rooms.db.prepare("SELECT name FROM teams WHERE id=?").get(teamId)?.name;
+      rooms.record(id, "folder.team.changed", `${folderName(id, folderId)}: ${name} (${req.body.role})`, res.locals.actor);
+    }),
+  );
+  // A manager can remove a folder's team share at any time, even after leaving that team.
+  app.delete("/api/rooms/:roomId/folders/:folderId/team-shares/:teamId", (req, res) =>
+    folderShareCall(req, res, () => {
+      const id = res.locals.workspace.id as string, folderId = req.params.folderId as string, teamId = String(req.params.teamId);
+      const name = rooms.db.prepare("SELECT name FROM teams WHERE id=?").get(teamId)?.name;
+      folderSharing.revokeTeam(id, folderId, teamId);
+      rooms.record(id, "folder.team.removed", `${folderName(id, folderId)}: ${name ?? "A team"}`, res.locals.actor);
+    }),
+  );
   // Renaming or deleting the workspace itself is a management action.
   const requireManager: express.RequestHandler = (_req, res, next) => {
     if (res.locals.canEdit && !res.locals.canManage) {
@@ -838,10 +1041,9 @@ export function createApp(
       .run(name.trim(), room.id);
     rooms.record(room.id, "workspace.renamed", name.trim(), res.locals.actor);
     for (const session of rooms.active.values())
-      if (session.workspaceId === room.id) {
-        session.name = name.trim();
-        session.doc.getMap("workspace").set("name", name.trim());
-      }
+      if (session.workspaceId === room.id) session.name = name.trim();
+    // Open clients re-read the name over REST (it is no longer part of the live lesson).
+    rooms.notifyWorkspace(room.id, { workspace: true });
     res.json({ ok: true });
   });
   app.delete("/api/rooms/:roomId", requireManager, (_req, res) => {
@@ -863,6 +1065,21 @@ export function createApp(
     legacyHeaders: false,
     message: { error: "Too many images at once. Wait a few minutes and try again." },
   });
+  // A new image counts as used, and vouched for, in the lesson it was uploaded into (?folder=,
+  // or the root): its uploader had Editor rights there, so it can show at once to that
+  // lesson's recipients. The next save keeps the reference only if a document there uses it.
+  const uploadedInto = (req: express.Request, workspaceId: string, imageId: string) => {
+    const folder = typeof req.query.folder === "string" ? req.query.folder : null;
+    if (folder === null || rooms.db.prepare("SELECT 1 FROM folders WHERE id=? AND workspace_id=?").get(folder, workspaceId))
+      vouchImages(rooms.db, workspaceId, folder, [imageId]);
+  };
+  // REST writes vouch for the image links they add the same way live edits do (see
+  // Rooms.vouchAdded): only images the writer could already see.
+  const vouchWrite = (res: express.Response, room: Room, before: string[], after: string[]) =>
+    rooms.vouchAdded(room, before, after, {
+      canSeeAll: () => canReadAccess(res.locals.workspaceAccess),
+      userId: (res.locals.session as Session | undefined)?.user.id,
+    });
   app.get("/api/rooms/:roomId/images/:imageId", (req, res) =>
     images.serve(res.locals.workspace.id, req.params.imageId, res, req.headers["if-none-match"]),
   );
@@ -873,6 +1090,7 @@ export function createApp(
     (req, res) => {
       const data = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
       const image = images.store(res.locals.workspace.id, data);
+      uploadedInto(req, res.locals.workspace.id, image.id);
       rooms.record(res.locals.workspace.id, "image", "Added an image", res.locals.actor);
       res.status(201).json(image);
     },
@@ -882,6 +1100,7 @@ export function createApp(
       if (typeof req.body?.url !== "string" || req.body.url.length > 2048)
         throw Object.assign(new Error("Enter an image link."), { status: 400 });
       const image = images.store(res.locals.workspace.id, await fetchImage(req.body.url));
+      uploadedInto(req, res.locals.workspace.id, image.id);
       rooms.record(res.locals.workspace.id, "image", "Added an image", res.locals.actor);
       res.status(201).json(image);
     } catch (error) {
@@ -946,7 +1165,7 @@ export function createApp(
       );
     doc.destroy();
     rooms.record(workspaceId, "folder.created", name, res.locals.actor);
-    rooms.syncCatalog(workspaceId);
+    rooms.notifyTree(workspaceId, [parent]);
     res.status(201).json({ id });
   });
   app.patch("/api/rooms/:roomId/folders/order", (req, res) => {
@@ -976,7 +1195,7 @@ export function createApp(
       rooms.db.exec("ROLLBACK");
       throw error;
     }
-    rooms.syncCatalog(workspaceId);
+    rooms.notifyTree(workspaceId, [parent]);
     res.json({ ok: true });
   });
   app.patch("/api/rooms/:roomId/folders/:id", (req, res) => {
@@ -991,7 +1210,9 @@ export function createApp(
       return;
     }
     rooms.record(res.locals.workspace.id, "folder.renamed", name, res.locals.actor);
-    rooms.syncCatalog(res.locals.workspace.id);
+    // The folder itself (a recipient of a shared folder sees its name) and its parent.
+    const renamedParent = rooms.db.prepare("SELECT parent_id FROM folders WHERE id=?").get(req.params.id)?.parent_id as string | null;
+    rooms.notifyTree(res.locals.workspace.id, [req.params.id, renamedParent ?? null]);
     res.json({ ok: true });
   });
   app.delete("/api/rooms/:roomId/folders/:id", (req, res) => {
@@ -1009,6 +1230,9 @@ export function createApp(
       res.status(404).json({ error: "Folder not found." });
       return;
     }
+    // Who hears about it is decided now, while the folder and its shares still exist.
+    const deletedParent = rooms.db.prepare("SELECT parent_id FROM folders WHERE id=?").get(req.params.id)?.parent_id as string | null;
+    const audience = rooms.treeAudience(workspaceId, [req.params.id, deletedParent ?? null]);
     for (const session of [...rooms.active.values()])
       if (
         session.workspaceId === workspaceId &&
@@ -1022,7 +1246,13 @@ export function createApp(
       .prepare("DELETE FROM folders WHERE id=? AND workspace_id=?")
       .run(req.params.id, workspaceId);
     rooms.record(workspaceId, "folder.deleted", String(folderName), res.locals.actor);
-    rooms.syncCatalog(workspaceId);
+    // Its folder shares went with it (ON DELETE CASCADE): re-check everyone else's rights.
+    rooms.revalidate(
+      workspaceId,
+      (hash, user) => accounts.sessionValid(hash, user),
+      "Your access to this workspace changed. Refresh to continue.",
+    );
+    rooms.sendTree([...audience].filter((peer) => rooms.live.has(peer)));
     res.json({ ok: true });
   });
   app.use("/api/rooms/:roomId", (req, res, next) => {
@@ -1041,6 +1271,11 @@ export function createApp(
     }
     room.touched = Date.now();
     res.locals.room = room;
+    // Held until the response ends: a request may wait for its body (file uploads) before it
+    // uses the lesson, and a held lesson is never unloaded to make space for another.
+    const done = rooms.hold(room);
+    res.once("finish", done);
+    res.once("close", done);
     next();
   });
   app.post("/api/rooms/:roomId/migrate-snippets", (_req, res) => {
@@ -1053,7 +1288,7 @@ export function createApp(
         `${result.migrated} snippets`,
         res.locals.actor,
       );
-      rooms.syncCatalog(res.locals.room.workspaceId);
+      rooms.notifyTree(res.locals.room.workspaceId, [res.locals.room.folderId]);
     }
     res.json(result);
   });
@@ -1075,6 +1310,7 @@ export function createApp(
     const bytes = Buffer.byteLength(content);
     if (bytes > MAX_DOCUMENT) throw fileTooLarge(bytes);
     if (content) validateLessonCapacity(res.locals.room, content);
+    vouchWrite(res, res.locals.room, [], [content]);
     const id = addDocument(
       res.locals.room,
       filename(req.body.filename),
@@ -1088,7 +1324,7 @@ export function createApp(
       req.body.filename,
       res.locals.actor,
     );
-    rooms.syncCatalog(res.locals.room.workspaceId);
+    rooms.notifyTree(res.locals.room.workspaceId, [res.locals.room.folderId]);
     const version = contentVersion(content);
     res.status(201).set("ETag", `"${version}"`).json({ id, version, bytes });
   });
@@ -1167,6 +1403,7 @@ export function createApp(
       });
       return;
     }
+    vouchWrite(res, found.room, [existing], [content]);
     const changed = replaceContent(found.room, req.params.id as string, content);
     if (changed) {
       rooms.noteEdit(found.room, req.params.id as string, res.locals.actor);
@@ -1190,7 +1427,7 @@ export function createApp(
       ids.forEach((id, position) => docs.get(id)!.set("position", position)),
     );
     rooms.save(room);
-    rooms.syncCatalog(room.workspaceId);
+    rooms.notifyTree(room.workspaceId, [room.folderId]);
     res.json({ ok: true });
   });
   app.patch("/api/rooms/:roomId/documents/:id", (req, res) => {
@@ -1224,7 +1461,7 @@ export function createApp(
     });
     rooms.save(room);
     if (name) rooms.record(room.workspaceId, "file.renamed", name, res.locals.actor);
-    rooms.syncCatalog(room.workspaceId);
+    rooms.notifyTree(room.workspaceId, [room.folderId]);
     res.json({ ok: true });
   });
   app.delete("/api/rooms/:roomId/documents/:id", (req, res) => {
@@ -1239,7 +1476,7 @@ export function createApp(
     docs.delete(req.params.id);
     rooms.save(res.locals.room);
     rooms.record(res.locals.room.workspaceId, "file.deleted", deletedName, res.locals.actor);
-    rooms.syncCatalog(res.locals.room.workspaceId);
+    rooms.notifyTree(res.locals.room.workspaceId, [res.locals.room.folderId]);
     res.json({ ok: true });
   });
   app.post("/api/rooms/:roomId/checkpoint", (_req, res) => {
@@ -1362,6 +1599,7 @@ export function createApp(
     server,
     rooms,
     accounts,
+    folderSharing,
     outbox,
     close: async () => {
       if (closed) return;

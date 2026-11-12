@@ -4,6 +4,7 @@ import {
   Clock3,
   Copy,
   FileCode2,
+  Folder,
   FolderOpen,
   History,
   Link2,
@@ -23,10 +24,12 @@ import { MyTeams, TeamWorkspaces } from "./Teams";
 import { api, readLocal } from "../lib";
 import {
   activityText,
+  folderPath,
   forgetLegacy,
   legacyShortcuts,
   relativeTime,
   type OwnedWorkspace,
+  type SharedFolder,
   type SharedWorkspace,
 } from "../workspaces";
 
@@ -97,6 +100,7 @@ export default function WorkspaceDashboard({
   const [importing, setImporting] = useState(false);
   const [importNotes, setImportNotes] = useState<string[]>([]);
   const [shared, setShared] = useState<SharedWorkspace[] | null>(null);
+  const [sharedFolders, setSharedFolders] = useState<SharedFolder[]>([]);
   const [sharedError, setSharedError] = useState("");
   const [{ view, team }, setLocation] = useState(readView);
   const [invitationCount, setInvitationCount] = useState(0);
@@ -130,8 +134,9 @@ export default function WorkspaceDashboard({
   }
   async function loadShared() {
     try {
-      const result = await api<{ workspaces: SharedWorkspace[] }>("/me/shared");
+      const result = await api<{ workspaces: SharedWorkspace[]; folders?: SharedFolder[] }>("/me/shared");
       setShared(result.workspaces);
+      setSharedFolders(result.folders ?? []);
       setSharedError("");
     } catch (e) {
       setSharedError((e as Error).message);
@@ -256,7 +261,7 @@ export default function WorkspaceDashboard({
         <div className="dashboard-heading">
           <div>
             <h2>Shared with Me</h2>
-            <p>Workspaces other owners shared with your account.</p>
+            <p>Workspaces and folders other owners shared with your account.</p>
           </div>
         </div>
         {sharedError ? (
@@ -267,7 +272,7 @@ export default function WorkspaceDashboard({
           <p className="dashboard-empty">
             <Loader2 size={20} className="spin" /> Loading shared workspaces…
           </p>
-        ) : !shared.length ? (
+        ) : !shared.length && !sharedFolders.length ? (
           <p className="dashboard-empty">
             Nothing has been shared with you yet. When an owner shares a
             workspace with your email, it appears here.
@@ -320,6 +325,47 @@ export default function WorkspaceDashboard({
                 <div className="workspace-card-bottom">
                   <span>Updated {relativeTime(item.updated_at)}</span>
                   <button className="text-button" onClick={() => open(item.id)}>
+                    Open <ArrowRight size={15} />
+                  </button>
+                </div>
+              </article>
+            ))}
+            {/* Folders shared on their own: the folder's name, role and owner only (the
+                server sends nothing about the rest of the workspace). */}
+            {sharedFolders.map((item) => (
+              <article
+                className="workspace-card shared-folder-card"
+                key={"folder:" + item.folderId}
+                aria-label={item.name}
+              >
+                <div className="workspace-card-top">
+                  <span className="workspace-card-icon" title="Shared folder">
+                    <Folder size={19} />
+                  </span>
+                </div>
+                <h3>{item.name}</h3>
+                <p className="workspace-description">
+                  Shared folder
+                  {item.via.some((v) => v.kind === "team")
+                    ? " · through " +
+                      item.via
+                        .flatMap((v) => (v.kind === "team" ? [v.teamName] : []))
+                        .join(", ")
+                    : ""}
+                </p>
+                <div className="workspace-card-counts">
+                  <span className={"role-badge " + item.role}>
+                    {item.role === "editor" ? "Editor" : "Viewer"}
+                  </span>
+                  {item.ownerName && <> Shared by {item.ownerName}</>}
+                </div>
+                <div className="workspace-card-bottom">
+                  <span>Shared {relativeTime(item.sharedAt)}</span>
+                  <button
+                    className="text-button"
+                    aria-label={"Open folder " + item.name}
+                    onClick={() => navigate(folderPath(item))}
+                  >
                     Open <ArrowRight size={15} />
                   </button>
                 </div>

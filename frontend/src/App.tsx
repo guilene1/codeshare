@@ -54,6 +54,7 @@ import type { editor } from "monaco-editor";
 import Modal from "./components/Modal";
 import SettingsPanel from "./components/SettingsPanel";
 import AccessShare from "./components/AccessShare";
+import FolderShare from "./components/FolderShare";
 import CodeBlocks from "./components/CodeBlocks";
 import CreateWorkspace from "./components/CreateWorkspace";
 import WorkspaceDashboard from "./components/WorkspaceDashboard";
@@ -109,7 +110,15 @@ type RoomInfo = {
   hasEditorLink?: boolean;
   // General access: "link" (anyone with the link can view) or "private".
   visibility?: "link" | "private";
+  // A folder-only recipient's view (the server sends nothing else): the folders shared with
+  // them and the owner's name. There is no workspace name, root or access level.
+  scoped?: boolean;
+  ownerName?: string | null;
+  folders?: Array<{ id: string; name: string; role: FolderRole }>;
 };
+type FolderRole = "viewer" | "editor";
+// The server's reply, normalized: a folder-only recipient's info has no workspace name.
+const asRoom = (value: RoomInfo): RoomInfo => (value.scoped ? { ...value, name: "" } : value);
 type Person = {
   id: number;
   name: string;
@@ -638,6 +647,16 @@ function Workspace({
     ),
     [tree, setTree] = useState<CourseTree>({ folders: [], documents: [] }),
     [treeReady, setTreeReady] = useState(false),
+    // This account's own folder grants (folder ID -> role), read from the server. null until
+    // known, for the people who can have any (see needsGrants).
+    [grants, setGrants] = useState<Record<string, FolderRole> | null>(null),
+    // A folder-only recipient whose access ended while the page was open (or whose folders
+    // are all gone): a generic screen, with nothing about the workspace.
+    [gone, setGone] = useState(false),
+    // Share folder (workspace sharing managers only): the folder being shared, and which
+    // folders are shared on their own (for the Explorer's indicator).
+    [shareFolder, setShareFolder] = useState<{ id: string; name: string } | null>(null),
+    [sharedFolders, setSharedFolders] = useState<Set<string>>(() => new Set()),
     [workspaceView, setWorkspaceView] = useState<"editor" | "blocks">(() =>
       new URLSearchParams(location.search).get("view") === "blocks"
         ? "blocks"
@@ -720,8 +739,40 @@ function Workspace({
   const current = openTabs.includes(active)
     ? files.find((f) => f.id === active)
     : undefined;
+  // A folder-only recipient: the server gives them their shared folders and nothing else.
+  const scoped = !!room?.scoped;
   const isOwner = room?.access === "owner";
-  const isEditor = isOwner || room?.access === "editor";
+  // Workspace-level Owner or Editor: presence, activity, the Connected list, sharing and
+  // workspace management. Folder grants never give these.
+  const workspaceEditor = !scoped && (isOwner || room?.access === "editor");
+  // Folder grants exist only for signed-in accounts in Restricted workspaces; anyone who
+  // already edits the whole workspace needs none.
+  const needsGrants =
+    !!user && !!room && (scoped || (!workspaceEditor && room.visibility === "private"));
+  const lessonReady = !needsGrants || grants !== null;
+  const folderRole = folder ? grants?.[folder] : undefined;
+  // Editing rights in the open lesson: workspace editing, or this account's own Editor grant
+  // on this folder (the server checks every change the same way).
+  const isEditor = workspaceEditor || folderRole === "editor";
+  // Where folders may be created (and so renamed, moved or deleted, which needs Editor rights
+  // on the parent): anywhere for workspace editors, else inside folders this account edits.
+  // The shared folder itself has its parent outside the grant, so it stays protected.
+  // Folder sharing is managed by the people who manage workspace sharing (the owner and direct
+  // Editors, as the server decides). Never team-derived Editors, Edit Link guests, Viewers or
+  // folder-only recipients; the server refuses them too.
+  const canShareFolders = !scoped && !!room?.canShare;
+  const canOrganize = (parent: string | null) =>
+    workspaceEditor || (!!parent && grants?.[parent] === "editor");
+  // The shared folder (top of the recipient's tree) that holds the open lesson.
+  const sharedRoot = (() => {
+    if (!scoped) return undefined;
+    let item = tree.folders.find((f) => f.id === folder);
+    for (let guard = 0; item?.parent_id && guard < 16; guard++)
+      item = tree.folders.find((f) => f.id === item!.parent_id);
+    return item;
+  })();
+  // A folder-only recipient connects only to a lesson the server listed for them.
+  const scopedLessonOk = !scoped || (!!folder && treeReady && tree.folders.some((f) => f.id === folder));
   const anonymousViewers = plural(presence?.anonymous ?? 0, "anonymous viewer");
   // Never carry a page-session Edit Link over to another workspace.
   useEffect(() => setFreshEditLink(""), [id]);
@@ -745,7 +796,7 @@ function Workspace({
   // Viewers always read documents in the formatted Preview; only editors switch views.
   const markdownMode = isEditor ? chosenMode : "preview";
   // Owners manage the workspace; unclaimed v1 workspaces keep link-based management.
-  const canManage = isOwner || (isEditor && !room?.owned);
+  const canManage = isOwner || (workspaceEditor && !room?.owned);
   const tabsKey = `devshare.tabs.${id}.${folder ?? "root"}`;
   const openTab = (fileId: string) => setPendingOpen(fileId);
   useEffect(() => {
@@ -806,8 +857,8 @@ function Workspace({
   }, [openTabs, active, tabsKey]);
   // My Workspaces reopens the lesson this browser last used (a folder ID, not a secret).
   useEffect(() => {
-    if (isEditor) storeLocal("devshare.lastLesson." + id, folder);
-  }, [isEditor, id, folder]);
+    if (workspaceEditor) storeLocal("devshare.lastLesson." + id, folder);
+  }, [workspaceEditor, id, folder]);
   function createBlockFromSelection(content: string, language: string) {
     if (!isEditor || !content) return;
     setBlockDialog({
@@ -888,8 +939,8 @@ function Workspace({
       try {
         const image =
           typeof source === "string"
-            ? await api<UploadedImage>(`/rooms/${id}/images/import`, "POST", { url: source }, credential)
-            : await uploadImage(id, source, credential);
+            ? await roomApi<UploadedImage>(`/rooms/${id}/images/import`, "POST", { url: source })
+            : await uploadImage(id, source, credential, folder);
         lines.push(imageMarkdown(altFor(source), imageUrl(id, image.id)));
       } catch (e) {
         failed++;
@@ -1008,9 +1059,9 @@ function Workspace({
         return;
       }
     }
-    navigate(user ? "/workspaces" : "/");
+    navigate(user ? (scoped ? "/workspaces?view=shared" : "/workspaces") : "/");
   }
-  const roomApi = <T = { ok: boolean },>(
+  const roomApi =<T = { ok: boolean },>(
     path: string,
     method = "GET",
     body?: unknown,
@@ -1026,11 +1077,43 @@ function Workspace({
       body,
       credential,
     );
+  // Current values for callbacks created earlier (socket handlers).
+  const scopedRef = useRef(scoped),
+    needsGrantsRef = useRef(needsGrants),
+    canShareFoldersRef = useRef(canShareFolders);
+  scopedRef.current = scoped;
+  needsGrantsRef.current = needsGrants;
+  canShareFoldersRef.current = canShareFolders;
+  // Which folders are shared on their own (managers only; others never ask).
+  const loadSharedFolders = () =>
+    canShareFoldersRef.current
+      ? api<{ folders: Array<{ id: string }> }>(`/rooms/${id}/folder-shares`)
+          .then((value) => setSharedFolders(new Set(value.folders.map((f) => f.id))))
+          .catch(() => {})
+      : Promise.resolve(setSharedFolders(new Set()));
+  // A folder-only recipient who lost access sees the same generic screen whether the folder
+  // was deleted, unshared or never theirs: nothing about the workspace.
+  const accessEnded = (e: unknown) => {
+    if (scopedRef.current && e instanceof ApiError && e.status === 404) setGone(true);
+  };
   // Re-reads this user's rights after a sharing change, so lost controls disappear at once.
   const reloadRoom = () =>
     roomApi<RoomInfo>("/rooms/" + id)
-      .then(setRoom)
-      .catch(() => {});
+      .then((value) => setRoom(asRoom(value)))
+      .catch(accessEnded);
+  // This account's own folder grants (where it may edit and organize). Re-read with the tree,
+  // since sharing changes that alter them come as tree notices or a closed socket.
+  const loadGrants = () =>
+    needsGrantsRef.current
+      ? api<{ roles: Record<string, FolderRole> }>(`/rooms/${id}/folder-roles`)
+          .then((value) => setGrants(value.roles))
+          .catch((e) => {
+            accessEnded(e);
+            // Never wait forever: without known grants the page opens read-only (the server
+            // decides every change anyway), and the next tree notice tries again.
+            setGrants((previous) => previous ?? {});
+          })
+      : Promise.resolve();
   function openLesson(next: string | null, file?: string) {
     setError("");
     if (next === folder) {
@@ -1055,7 +1138,7 @@ function Workspace({
     let canceled = false;
     roomApi<RoomInfo>("/rooms/" + id)
       .then((r) => {
-        if (!canceled) setRoom(r);
+        if (!canceled) setRoom(asRoom(r));
       })
       .catch((e) => {
         if (canceled) return;
@@ -1070,27 +1153,55 @@ function Workspace({
       canceled = true;
     };
   }, [id, credential]);
-  useEffect(() => {
-    if (!room) return;
-    api<CourseTree>("/rooms/" + id + "/tree", "GET", undefined, credential)
-      .then((value) => {
+  // The Explorer tree comes over REST with this visitor's own credentials, never inside the
+  // live lesson; the socket only says when to re-read it. Only the newest response is applied,
+  // so a slow earlier one can't overwrite a newer tree.
+  const treeRequest = useRef(0);
+  const loadTree = () => {
+    const request = ++treeRequest.current;
+    return api<CourseTree>("/rooms/" + id + "/tree", "GET", undefined, credential).then(
+      (value) => {
+        if (request !== treeRequest.current) return;
         setTree(value);
         setTreeReady(true);
-      })
-      .catch((e) => setError(e.message));
-  }, [id, credential, room?.access]);
+      },
+    );
+  };
   useEffect(() => {
-    if (
-      treeReady &&
-      folder &&
-      !tree.folders.some((item) => item.id === folder)
-    ) {
+    if (!room) return;
+    loadTree().catch((e) => (scopedRef.current ? accessEnded(e) : setError(e.message)));
+  }, [id, credential, room?.access, room?.scoped]);
+  useEffect(() => {
+    if (room && needsGrants) void loadGrants();
+  }, [id, room?.access, room?.scoped, needsGrants]);
+  useEffect(() => {
+    if (room) void loadSharedFolders();
+  }, [id, canShareFolders]);
+  useEffect(() => {
+    if (!treeReady) return;
+    // A folder-only recipient has no workspace root: a link without a folder, or to a folder
+    // they can't open (deleted, unshared, or never shared), opens their first shared folder.
+    // The notice is the same in every case, so it reveals nothing about the other folder.
+    if (scoped) {
+      if (folder && tree.folders.some((item) => item.id === folder)) return;
+      const first = tree.folders.find((item) => item.parent_id === null);
+      if (!first) setGone(true);
+      else {
+        if (folder) notify("That folder isn’t available. Opening a folder shared with you.");
+        openLesson(first.id);
+      }
+      return;
+    }
+    if (folder && !tree.folders.some((item) => item.id === folder)) {
       openLesson(null);
       notify("That lesson is no longer available. Open another folder.");
     }
-  }, [tree, treeReady, folder]);
+  }, [tree, treeReady, folder, scoped]);
   useEffect(() => {
-    if (!room || (isEditor && (joining || !name.trim()))) return;
+    // Wait until this account's folder rights are known (they decide editor or viewer), and
+    // a folder-only recipient connects only to a lesson listed for them, never to the root.
+    if (!room || gone || !lessonReady || !scopedLessonOk) return;
+    if (isEditor && (joining || !name.trim())) return;
     const doc = new Y.Doc(),
       url = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws`,
       p = new WebsocketProvider(url, id, doc, {
@@ -1133,25 +1244,21 @@ function Workspace({
         pendingFile.current = null;
       }
       setMigrated(!!doc.getMap("migrations").get("snippetsToMarkdown"));
-      const catalog = doc.getMap("catalog").get("tree") as
-        | CourseTree
-        | undefined;
-      if (catalog?.folders && catalog?.documents) {
-        setTree(catalog);
-        setTreeReady(true);
-      }
       setBlocks(
         [...doc.getMap<CodeBlock>("codeBlocks").values()].sort(
           (a, b) => a.position - b.position || a.id.localeCompare(b.id),
         ),
       );
-      const sharedName = doc.getMap("workspace").get("name");
-      if (typeof sharedName === "string")
-        setRoom((previous) =>
-          previous && previous.name !== sharedName
-            ? { ...previous, name: sharedName }
-            : previous,
-        );
+    };
+    // Tree notices can come in bursts (a folder and its files); re-read once per burst.
+    let treeTimer: ReturnType<typeof setTimeout> | undefined;
+    const treeChanged = () => {
+      clearTimeout(treeTimer);
+      treeTimer = setTimeout(() => {
+        void loadTree().catch(accessEnded);
+        void loadGrants();
+        void loadSharedFolders();
+      }, 100);
     };
     const presence = () => {
       const result: Person[] = [];
@@ -1204,7 +1311,13 @@ function Workspace({
         setPresence(null);
       }
     };
-    const sync = (value: boolean) => setSynced(value);
+    // After a reconnect, re-read the tree: notices sent while offline were missed.
+    let firstSync = true;
+    const sync = (value: boolean) => {
+      setSynced(value);
+      if (value && !firstSync) treeChanged();
+      if (value) firstSync = false;
+    };
     const close = (event: CloseEvent | null) => {
       if (event?.code === 1008) {
         setError(
@@ -1214,12 +1327,8 @@ function Workspace({
         p.shouldConnect = false;
         // A changed or removed share closes the socket this way: drop controls it no longer allows.
         reloadRoom();
-        api<CourseTree>("/rooms/" + id + "/tree", "GET", undefined, credential)
-          .then((value) => {
-            setTree(value);
-            setTreeReady(true);
-          })
-          .catch(() => {});
+        loadTree().catch(accessEnded);
+        void loadGrants();
       }
     };
     const changed = (_update: Uint8Array, origin: unknown) => {
@@ -1253,6 +1362,19 @@ function Workspace({
           ),
         );
     };
+    // Kodelumi message type 5: data-free notices for everyone in the workspace. The tree and
+    // the workspace name are re-read over REST, so only what this visitor may see arrives.
+    p.messageHandlers[5] = (_encoder, decoder) => {
+      const notice = JSON.parse(decoding.readVarString(decoder)) as {
+        tree?: boolean;
+        workspace?: boolean;
+        folderShares?: boolean;
+      };
+      if (notice.tree) treeChanged();
+      if (notice.workspace) reloadRoom();
+      // Sent only to sharing managers: which folders are shared changed (Explorer marks).
+      if (notice.folderShares) void loadSharedFolders();
+    };
     doc.on("update", changed);
     p.on("status", connection);
     p.on("sync", sync);
@@ -1263,6 +1385,7 @@ function Workspace({
     presence();
     return () => {
       clearTimeout(checkpoint);
+      clearTimeout(treeTimer);
       doc.off("update", changed);
       p.awareness.off("change", presence);
       p.off("status", connection);
@@ -1271,13 +1394,13 @@ function Workspace({
       p.destroy();
       doc.destroy();
     };
-  }, [room?.id, room?.access, joining, credential, folder]);
+  }, [room?.id, room?.access, joining, credential, folder, isEditor, lessonReady, scopedLessonOk, gone]);
   useEffect(() => {
     if (current) provider?.awareness.setLocalStateField("fileId", current.id);
   }, [current?.id, provider]);
   // Recent activity loads on each (re)connect; live changes then arrive over the socket.
   useEffect(() => {
-    if (!isEditor || status !== "connected") return;
+    if (!workspaceEditor || status !== "connected") return;
     let canceled = false;
     roomApi<{ entries: Activity[]; hasMore: boolean }>(`/rooms/${id}/activity`)
       .then((page) => {
@@ -1289,7 +1412,7 @@ function Workspace({
     return () => {
       canceled = true;
     };
-  }, [isEditor, status, id]);
+  }, [workspaceEditor, status, id]);
   async function loadMoreActivity() {
     const last = activity.at(-1);
     if (!last) return;
@@ -1503,6 +1626,22 @@ function Workspace({
     URL.revokeObjectURL(url);
     notify("File downloaded");
   }
+  // Generic on purpose: the same for a deleted folder, a removed share or a changed link, and
+  // nothing about the workspace it was in.
+  if (gone)
+    return (
+      <div className="center-state" role="region" aria-label="Folder unavailable">
+        <Logo />
+        <h2>This folder isn’t available</h2>
+        <p className="muted">
+          It may have been deleted, or your access to it was removed. Ask the person who shared it
+          with you if you still need it.
+        </p>
+        <button className="button primary" onClick={() => navigate(user ? "/workspaces?view=shared" : "/")}>
+          {user ? "Shared with Me" : "Back to home"}
+        </button>
+      </div>
+    );
   if (error && !provider)
     return (
       <div className="center-state">
@@ -1511,9 +1650,22 @@ function Workspace({
         <p className="error" role="alert">
           {error}
         </p>
-        <button className="button primary" onClick={() => navigate("/")}>
-          Back to home
-        </button>
+        <div className="dialog-actions">
+          {/* A workspace or folder shared with an account opens after signing in. */}
+          {!user && (
+            <button
+              className="button secondary"
+              onClick={() =>
+                navigate("/signin?next=" + encodeURIComponent(location.pathname + location.search))
+              }
+            >
+              Sign in
+            </button>
+          )}
+          <button className="button primary" onClick={() => navigate("/")}>
+            Back to home
+          </button>
+        </div>
       </div>
     );
   if (!room)
@@ -1543,20 +1695,28 @@ function Workspace({
           <button
             className="workspace-back text-button"
             onClick={() => void returnToWorkspaces()}
-            title={user ? "My Workspaces" : "Home"}
+            title={user ? (scoped ? "Shared with Me" : "My Workspaces") : "Home"}
           >
             <ArrowLeft size={16} />
-            <span>{user ? "My Workspaces" : "Home"}</span>
+            <span>{user ? (scoped ? "Shared with Me" : "My Workspaces") : "Home"}</span>
           </button>
         )}
         <span className="workspace-brand">
           <Logo />
         </span>
         <span className="nav-divider" />
-        <div className="room-title">
-          <span className="room-title-label">WORKSPACE</span>
-          <strong>{room.name}</strong>
-        </div>
+        {scoped ? (
+          // A folder-only recipient sees the shared folder and who shared it, never the workspace.
+          <div className="room-title">
+            <span className="room-title-label">SHARED FOLDER</span>
+            <strong title={sharedRoot?.name}>{sharedRoot?.name ?? "Shared folder"}</strong>
+          </div>
+        ) : (
+          <div className="room-title">
+            <span className="room-title-label">WORKSPACE</span>
+            <strong>{room.name}</strong>
+          </div>
+        )}
         {/* Editors choose the file's language; viewers just read the highlighted file. */}
         {isEditor && (
           <div className="toolbar-language">
@@ -1577,12 +1737,13 @@ function Workspace({
           </span>
           <span
             className={"access-badge " + (isEditor ? "editing" : "view-only")}
-            aria-label="Workspace access"
+            aria-label={scoped ? "Folder access" : "Workspace access"}
           >
             {isEditor ? <Pencil size={13} /> : <Eye size={14} />}
-            <span>{isEditor ? "Editing" : "View Only"}</span>
+            {/* A shared folder shows the recipient's role there (it can differ per subfolder). */}
+            <span>{scoped ? (isEditor ? "Editor" : "Viewer") : isEditor ? "Editing" : "View Only"}</span>
           </span>
-          {isEditor && (
+          {workspaceEditor && (
             <span
               className="presence-count"
               title={`${anonymousViewers} online`}
@@ -1594,8 +1755,9 @@ function Workspace({
               </span>
             </span>
           )}
-          {/* View-only readers get no built-in Copy controls, including link copying. */}
-          {isEditor && (
+          {/* View-only readers get no built-in Copy controls, including link copying. Sharing
+              and the workspace link are workspace-level: never for folder grants. */}
+          {workspaceEditor && (
             <>
               <button
                 className="icon-button desktop-tool"
@@ -1699,19 +1861,30 @@ function Workspace({
             <CourseExplorer
               tree={tree}
               name={room.name}
+              shared={
+                scoped
+                  ? { ownerName: room.ownerName ?? "", role: isEditor ? "editor" : "viewer" }
+                  : undefined
+              }
               folder={folder}
               active={current?.id}
               openTabs={openTabs}
               onCloseTab={closeTab}
-              canEdit={isEditor}
+              canOrganize={canOrganize}
+              onShare={canShareFolders ? setShareFolder : undefined}
+              sharedFolders={canShareFolders ? sharedFolders : undefined}
               connected={connected}
               onOpen={openLesson}
-              request={(path, method, body) =>
-                roomApi("/rooms/" + id + path, method, body)
-              }
+              request={async (path, method, body) => {
+                const result = await roomApi("/rooms/" + id + path, method, body);
+                // The notice will follow too; refreshing now keeps the change instant.
+                await loadTree().catch(() => {});
+                return result;
+              }}
             />
-            {/* Only Owners and Editors have the Connected section, so only they get the split. */}
-            {isEditor && (
+            {/* Only Owners and Editors have the Connected section, so only they get the split.
+                It is workspace-wide presence, so folder grants never show it. */}
+            {workspaceEditor && (
               <SidebarSplitter
                 height={peopleHeight}
                 onChange={(height) => {
@@ -1720,7 +1893,7 @@ function Workspace({
                 }}
               />
             )}
-            {isEditor && (
+            {workspaceEditor && (
               <div className="sidebar-people">
                 <div className="sidebar-heading">
                   CONNECTED<span>{presence?.total ?? 0}</span>
@@ -1781,7 +1954,7 @@ function Workspace({
             </div>
             <div className="sidebar-bottom">
               <span className="live-dot" />
-              Shared workspace<span>v1.0</span>
+              {scoped ? "Shared folder" : "Shared workspace"}<span>v1.0</span>
             </div>
           </aside>
         )}
@@ -1798,7 +1971,7 @@ function Workspace({
           {showViews && (
           <div className="workspace-views" aria-label="Workspace views">
             {explorerToggle}
-            {isEditor && (
+            {workspaceEditor && (
               <WorkspaceActivity
                 presence={presence}
                 entries={activity}
@@ -1936,7 +2109,7 @@ function Workspace({
                 )}
               </div>
               <div className="editor-breadcrumb">
-                <span>{room.name}</span>
+                <span>{scoped ? sharedRoot?.name : room.name}</span>
                 <ChevronRight size={12} />
                 <FileCode2 size={13} />
                 <span>
@@ -2355,7 +2528,7 @@ function Workspace({
           </form>
         </Modal>
       )}
-      {dialog === "share" && isEditor && (
+      {dialog === "share" && workspaceEditor && (
         <AccessShare
           folderId={folder}
           id={id}
@@ -2366,6 +2539,7 @@ function Workspace({
           selfId={user?.id}
           hasEditorLink={room.hasEditorLink}
           visibility={room.visibility ?? "link"}
+          sharedFolders={sharedFolders.size}
           onVisibilityChange={(visibility) =>
             setRoom((previous) => (previous ? { ...previous, visibility } : previous))
           }
@@ -2379,6 +2553,17 @@ function Workspace({
           }
           onAccessChange={() => void reloadRoom()}
           onClose={() => setDialog(null)}
+        />
+      )}
+      {shareFolder && canShareFolders && (
+        <FolderShare
+          workspaceId={id}
+          folder={shareFolder}
+          visibility={room.visibility ?? "link"}
+          selfId={user?.id}
+          copy={copy}
+          onChange={() => void loadSharedFolders()}
+          onClose={() => setShareFolder(null)}
         />
       )}
       {dialog === "settings" && (
@@ -2399,6 +2584,7 @@ function Workspace({
             canManage
               ? async (value) => {
                   await roomApi("/rooms/" + id, "PATCH", { name: value });
+                  await reloadRoom();
                   notify("Workspace name updated");
                 }
               : undefined

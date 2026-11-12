@@ -7,6 +7,7 @@ import { randomBytes, createHash } from "node:crypto";
 import * as Y from "yjs";
 import { WebSocket } from "ws";
 import { WebsocketProvider } from "y-websocket";
+import * as decoding from "lib0/decoding";
 import { createApp } from "../src/app.js";
 import { createRoom } from "./helpers.js";
 import { DatabaseSync } from "node:sqlite";
@@ -226,9 +227,19 @@ test("server enforces editor capability across REST, Yjs writes, spoofed roles, 
       ).status,
       200,
     );
-    await until(
-      () => reconnect.doc.getMap("workspace").get("name") === "Updated class",
+    // The name is not in the live lesson: a data-free notice tells clients to re-read it.
+    const notices: string[] = [];
+    reconnect.messageHandlers[5] = (_encoder, decoder) => {
+      notices.push(decoding.readVarString(decoder));
+    };
+    assert.equal(
+      (await request("/rooms/" + room.id, "PATCH", { name: "Renamed again" }, token)).status,
+      200,
     );
+    await until(() => notices.includes('{"workspace":true}'));
+    assert.equal((await (await request("/rooms/" + room.id)).json()).name, "Renamed again");
+    assert.deepEqual(reconnect.doc.getMap("workspace").toJSON(), {});
+    assert.ok(!JSON.stringify(reconnect.doc.toJSON()).includes("Renamed again"));
     const dump = JSON.stringify(
       app.rooms.db.prepare("SELECT * FROM rooms WHERE id=?").get(room.id),
     );

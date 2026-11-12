@@ -7,6 +7,7 @@ import { randomBytes, createHash } from "node:crypto";
 import * as Y from "yjs";
 import { WebSocket } from "ws";
 import { WebsocketProvider } from "y-websocket";
+import * as decoding from "lib0/decoding";
 import { createApp } from "../src/app.js";
 import { createRoom } from "./helpers.js";
 
@@ -155,14 +156,20 @@ test("nested lessons load lazily, retain inactive course data, isolate sessions 
         "Inactive week 1 secret marker",
       ),
     );
+    // The tree is not part of the live lesson: a data-free notice says to re-read it over REST.
+    const notices: string[] = [];
+    student.messageHandlers[5] = (_encoder, decoder) => {
+      notices.push(decoding.readVarString(decoder));
+    };
     await request(path + "/folders/" + week4, "PATCH", {
       name: "Terraform lesson",
     });
-    await until(() =>
-      JSON.stringify(student!.doc.getMap("catalog").toJSON()).includes(
-        "Terraform lesson",
-      ),
+    await until(() => notices.includes('{"tree":true}'));
+    assert.ok(
+      JSON.stringify(await (await request(path + "/tree", "GET", undefined, false)).json()).includes("Terraform lesson"),
     );
+    assert.deepEqual(student.doc.getMap("catalog").toJSON(), {});
+    assert.ok(!JSON.stringify(student.doc.toJSON()).includes("Terraform lesson"));
     await request(path + "/folders/order", "PATCH", {
       ids: [week4, week1],
       parent_id: null,
