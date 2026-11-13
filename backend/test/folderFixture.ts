@@ -58,7 +58,7 @@ export async function setup() {
         body: body === undefined ? undefined : raw ? (body as Buffer) : JSON.stringify(body),
       });
     // After restart() a pooled connection to the stopped server can be reset once.
-    const r = await send().catch((e) => (e?.cause?.code === "ECONNRESET" ? send() : Promise.reject(e)));
+    const r = await send().catch((e) => (["ECONNRESET", "UND_ERR_SOCKET"].includes(e?.cause?.code) ? send() : Promise.reject(e)));
     const text = await r.text();
     let json: any;
     try {

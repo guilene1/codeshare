@@ -2,6 +2,7 @@
 // the 1 MB limit message, live API updates in an open editor with conflict handling, and the
 // "code block into a new lesson" flow that posts content over REST.
 import { test, expect, type Page } from "@playwright/test";
+import { execFileSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { chooseDocumentView, createWorkspace, signUp } from "./helpers";
 
@@ -12,15 +13,27 @@ function code(bytes: number, seed = "") {
     out += `  const item_${seed}${i} = { name: "value-${i}", path: "/srv/app/${i}" }; // note\n`;
   return out.slice(0, bytes);
 }
-// Reads what the server saved, straight from the test database.
+// Reads what the server saved, straight from its database: the Docker stack's (read-only,
+// inside the application container) or the test-managed local one.
+const QUERY = "SELECT content FROM documents WHERE room_id=? AND filename=?";
+const fromContainer = (workspace: string, filename: string) => {
+  const script =
+    `const { DatabaseSync } = require("node:sqlite");` +
+    `const db = new DatabaseSync(process.env.DB_PATH, { readOnly: true });` +
+    `const row = db.prepare(${JSON.stringify(QUERY)}).get(process.argv[1], process.argv[2]);` +
+    `process.stdout.write(JSON.stringify(row ? row.content : null));`;
+  const out = execFileSync(
+    "docker",
+    ["compose", "-p", process.env.DEVSHARE_COMPOSE_PROJECT ?? "devshare-local", "exec", "-T", "application", "node", "-e", script, workspace, filename],
+    { maxBuffer: 16 * 1024 * 1024 },
+  );
+  return (JSON.parse(out.toString()) as string | null) ?? undefined;
+};
 const saved = (workspace: string, filename: string) => {
+  if (process.env.DEVSHARE_BASE_URL) return fromContainer(workspace, filename);
   const db = new DatabaseSync("data/e2e.sqlite", { readOnly: true });
   try {
-    return (
-      db
-        .prepare("SELECT content FROM documents WHERE room_id=? AND filename=?")
-        .get(workspace, filename) as { content: string } | undefined
-    )?.content;
+    return (db.prepare(QUERY).get(workspace, filename) as { content: string } | undefined)?.content;
   } finally {
     db.close();
   }
