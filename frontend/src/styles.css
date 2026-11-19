@@ -2126,6 +2126,31 @@ option {
   border-radius: 7px;
   padding-right: 6px;
 }
+/* Copy confirmation (Folder Sharing popup): the control that copied turns green for about 2 s.
+   White on #17865f is 4.6:1, readable in both themes. */
+.button.copied,
+.button.copied:hover,
+.icon-button.copied,
+.icon-button.copied:hover {
+  background: #17865f;
+  border-color: #17865f;
+  color: #fff;
+}
+/* Folder Sharing popup errors (copy, people, teams): red like every other .error, which the
+   section's paragraph style would otherwise turn grey. Darker red on the light theme's white. */
+.access-share-section > p.share-error {
+  color: #ed8696;
+}
+:root[data-theme="light"] .access-share-section > p.share-error {
+  color: #b4233a;
+}
+.access-share-section > p.copy-error {
+  margin-top: 8px;
+}
+.button.secondary,
+.copy-field .icon-button {
+  transition: background-color 0.15s, color 0.15s, border-color 0.15s;
+}
 .copy-field input {
   border: 0;
   background: transparent;

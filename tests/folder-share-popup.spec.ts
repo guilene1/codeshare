@@ -386,3 +386,91 @@ test("the Share Folder popup fits phones, tablets and desktops", async ({ browse
     await context.close();
   }
 });
+
+test("both copy controls confirm a copy: green, a checkmark and Copied!, then back after about 2 s; a failed copy says so", async () => {
+  test.setTimeout(120_000);
+  const page = owner.page;
+  await page.goto(url);
+  await expect(page.locator(".status-bar")).toContainText("Connected");
+  const dialog = await openShareFolder(page, "Sibling");
+  const folderLink = `${new URL(url).origin}/w/${id}?folder=${sibling}`;
+  await expect(dialog.locator('section[aria-label="Folder link"] input')).toHaveValue(folderLink);
+  const icon = dialog.getByRole("button", { name: "Copy link from the Folder link field", exact: true });
+  const button = dialog.locator('section[aria-label="Folder link"] button.full');
+  const green = "rgb(23, 134, 95)";
+  const background = (control: typeof icon) => control.evaluate((b) => getComputedStyle(b).backgroundColor);
+  await expect(button).toHaveText("Copy Folder Link");
+  const original = { icon: await background(icon), button: await background(button) };
+  expect(original.icon).not.toBe(green);
+  expect(original.button).not.toBe(green);
+  for (const [control, other] of [[icon, button], [button, icon]] as const) {
+    await page.evaluate(() => navigator.clipboard.writeText(""));
+    await control.click();
+    const copiedAt = Date.now();
+    // The control that copied turns green with a checkmark; the other one is unchanged.
+    await expect(control).toHaveClass(/\bcopied\b/);
+    await expect.poll(() => background(control)).toBe(green);
+    await expect(control.locator("svg.lucide-check")).toHaveCount(1);
+    if (control === button) await expect(button).toHaveText("Copied!");
+    else await expect(icon).toHaveAttribute("title", "Copied!");
+    await expect(other).not.toHaveClass(/\bcopied\b/);
+    await expect(dialog.getByRole("status")).toHaveText("Folder link copied");
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(folderLink);
+    await expect(dialog.getByRole("alert")).toHaveCount(0);
+    // Back to normal after about 2 seconds.
+    await expect(control).not.toHaveClass(/\bcopied\b/, { timeout: 4000 });
+    const shownFor = Date.now() - copiedAt;
+    expect(shownFor).toBeGreaterThanOrEqual(1700);
+    expect(shownFor).toBeLessThan(3500);
+    await page.mouse.move(0, 0); // compare the resting colour, not the hover colour
+    await expect.poll(() => background(control)).toBe(control === icon ? original.icon : original.button);
+    await expect(control.locator("svg.lucide-check")).toHaveCount(0);
+    if (control === button) await expect(button).toHaveText("Copy Folder Link");
+    else await expect(icon).toHaveAttribute("title", "Copy link");
+  }
+  // A refused copy: a clear message, never "Copied!".
+  await page.evaluate(() => {
+    navigator.clipboard.writeText = () => Promise.reject(new DOMException("Write permission denied.", "NotAllowedError"));
+  });
+  for (const control of [button, icon]) {
+    await control.click();
+    await expect(dialog.getByRole("alert")).toHaveText("Couldn’t copy the folder link. Select the link above and press Ctrl+C (⌘C on a Mac).");
+    expect(await dialog.getByRole("alert").evaluate((e) => getComputedStyle(e).color)).toBe("rgb(237, 134, 150)"); // error red (dark theme)
+    await expect(control).not.toHaveClass(/\bcopied\b/);
+    await expect(button).toHaveText("Copy Folder Link");
+    await expect(dialog.getByRole("status")).toHaveText("");
+  }
+  // Copying works again (the error clears).
+  await page.evaluate(() => delete (navigator.clipboard as { writeText?: unknown }).writeText);
+  await button.click();
+  await expect(button).toHaveText("Copied!");
+  await expect(dialog.getByRole("alert")).toHaveCount(0);
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(folderLink);
+  // The popup's other errors (adding people, adding teams) are red too, in both themes, with the
+  // same wording and spacing as before.
+  const style = (alert: ReturnType<typeof dialog.getByRole>) =>
+    alert.evaluate((e) => ({ color: getComputedStyle(e).color, margin: getComputedStyle(e).margin }));
+  const theme = await page.evaluate(() => document.documentElement.getAttribute("data-theme"));
+  const people = dialog.getByRole("region", { name: "People with access" });
+  await people.getByLabel("Email address").fill("not-an-email");
+  await people.getByRole("button", { name: "Share" }).click();
+  await expect(people.getByRole("alert")).toHaveText("Enter a complete email address, like name@example.com.");
+  expect(await style(people.getByRole("alert"))).toEqual({ color: "rgb(237, 134, 150)", margin: "0px" });
+  const teams = dialog.getByRole("region", { name: "Teams with access" });
+  const sharesBefore = (await api(page, `/rooms/${id}/folders/${sibling}/shares`)).body.direct;
+  await teams.getByLabel("Team", { exact: true }).selectOption({ label: "Lab Partners" });
+  // The server's refusal, simulated for this request only (nothing is shared).
+  await page.route(`**/api/rooms/${id}/folders/${sibling}/team-shares`, (route) =>
+    route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: "You can only share with teams you belong to." }) }),
+  );
+  await teams.getByRole("button", { name: "Share" }).click();
+  await expect(teams.getByRole("alert")).toHaveText("You can only share with teams you belong to.");
+  await page.unroute(`**/api/rooms/${id}/folders/${sibling}/team-shares`);
+  expect(await style(teams.getByRole("alert"))).toEqual({ color: "rgb(237, 134, 150)", margin: "0px" });
+  await page.evaluate(() => document.documentElement.setAttribute("data-theme", "light"));
+  expect((await style(teams.getByRole("alert"))).color).toBe("rgb(180, 35, 58)");
+  await page.evaluate((t) => (t === null ? document.documentElement.removeAttribute("data-theme") : document.documentElement.setAttribute("data-theme", t)), theme);
+  expect((await api(page, `/rooms/${id}/folders/${sibling}/shares`)).body.direct).toEqual(sharesBefore); // nothing was shared
+  await dialog.getByRole("button", { name: "Close dialog" }).click();
+  expect(owner.errors).toEqual([]);
+});

@@ -1,5 +1,5 @@
-import { useEffect, useState, type FormEvent } from "react";
-import { Copy, CornerLeftUp, Link, Loader2, LockKeyhole, UserPlus, Users, X } from "lucide-react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { Check, Copy, CornerLeftUp, Link, Loader2, LockKeyhole, UserPlus, Users, X } from "lucide-react";
 import Modal from "./Modal";
 import { api } from "../lib";
 import { BRAND } from "../brand";
@@ -36,7 +36,8 @@ export default function FolderShare({
   // Folder sharing exists only in Restricted workspaces; this popup never changes that.
   visibility: "link" | "private";
   selfId?: string;
-  copy: (value: string, label: string) => void;
+  // Resolves true when the clipboard holds the value.
+  copy: (value: string, label: string) => Promise<boolean>;
   // After any change, so the Explorer's shared-folder indicators follow.
   onChange: () => void;
   onClose: () => void;
@@ -54,6 +55,22 @@ export default function FolderShare({
   const [peopleError, setPeopleError] = useState("");
   const [teamError, setTeamError] = useState("");
   const [removing, setRemoving] = useState<Removal | null>(null);
+  // Which copy control just copied the link (green "Copied!" for about 2 s), or why copying failed.
+  const [copied, setCopied] = useState<"field" | "button" | null>(null);
+  const [copyError, setCopyError] = useState("");
+  const copiedTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(copiedTimer.current), []);
+  async function copyLink(control: "field" | "button") {
+    clearTimeout(copiedTimer.current);
+    setCopied(null);
+    setCopyError("");
+    if (await copy(link, "Folder link")) {
+      setCopied(control);
+      copiedTimer.current = setTimeout(() => setCopied(null), 2000);
+    } else {
+      setCopyError("Couldn’t copy the folder link. Select the link above and press Ctrl+C (⌘C on a Mac).");
+    }
+  }
   useEffect(() => {
     if (!restricted) return;
     api<Sharing>(`${base}/shares`)
@@ -124,15 +141,28 @@ export default function FolderShare({
           Folder link
           <div className="copy-field">
             <input readOnly value={link} onFocus={(e) => e.target.select()} />
-            <button className="icon-button" aria-label="Copy link from the Folder link field" title="Copy link" onClick={() => copy(link, "Folder link")}>
-              <Copy size={17} />
+            <button
+              className={"icon-button" + (copied === "field" ? " copied" : "")}
+              aria-label="Copy link from the Folder link field"
+              title={copied === "field" ? "Copied!" : "Copy link"}
+              onClick={() => void copyLink("field")}
+            >
+              {copied === "field" ? <Check size={17} /> : <Copy size={17} />}
             </button>
           </div>
         </label>
-        <button className="button secondary full" onClick={() => copy(link, "Folder link")}>
-          <Link size={16} />
-          Copy Folder Link
+        <button className={"button secondary full" + (copied === "button" ? " copied" : "")} onClick={() => void copyLink("button")}>
+          {copied === "button" ? <Check size={16} /> : <Link size={16} />}
+          {copied === "button" ? "Copied!" : "Copy Folder Link"}
         </button>
+        <span className="sr-only" role="status">
+          {copied ? "Folder link copied" : ""}
+        </span>
+        {copyError && (
+          <p className="error share-error copy-error" role="alert">
+            {copyError}
+          </p>
+        )}
       </section>
       {!restricted ? (
         <section className="access-share-section private-access" aria-label="Folder sharing unavailable">
@@ -173,7 +203,7 @@ export default function FolderShare({
               </button>
             </form>
             {peopleError && (
-              <p className="error" role="alert">
+              <p className="error share-error" role="alert">
                 {peopleError}
               </p>
             )}
@@ -275,7 +305,7 @@ export default function FolderShare({
               </form>
             )}
             {teamError && (
-              <p className="error" role="alert">
+              <p className="error share-error" role="alert">
                 {teamError}
               </p>
             )}

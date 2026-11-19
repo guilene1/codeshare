@@ -1487,12 +1487,15 @@ function Workspace({
     window.addEventListener("keydown", keys, true);
     return () => window.removeEventListener("keydown", keys, true);
   }, [id, provider, isEditor, credential, current?.id, openTabs]);
+  // Resolves true once the clipboard holds the value (callers may show their own confirmation).
   async function copy(value: string, label: string) {
     try {
       await navigator.clipboard.writeText(value);
       notify(label + " copied!");
+      return true;
     } catch {
       notify("Clipboard unavailable. Select the text and use Ctrl / ⌘ C.");
+      return false;
     }
   }
   function insertCode(text: string) {
