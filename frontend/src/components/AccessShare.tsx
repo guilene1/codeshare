@@ -1,5 +1,6 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
+  Check,
   Copy,
   Eye,
   EyeOff,
@@ -16,6 +17,19 @@ import Modal from "./Modal";
 import { api } from "../lib";
 import { BRAND } from "../brand";
 import type { ShareRole, TeamSummary } from "../workspaces";
+
+// The popup's copy controls: what each copies (for the toast and screen readers), which section
+// shows its error, and what to do when the browser refuses the clipboard.
+type CopyControl = "studentField" | "studentButton" | "code" | "editField" | "editButton";
+const STUDENT_LINK_FAILED = "Couldn’t copy the student link. Select the link above and press Ctrl+C (⌘C on a Mac).";
+const EDIT_LINK_FAILED = "Couldn’t copy the Edit Link. Show the link above, select it and press Ctrl+C (⌘C on a Mac).";
+const COPY_CONTROLS: Record<CopyControl, { label: string; section: "students" | "editors"; failed: string }> = {
+  studentField: { label: "Student link", section: "students", failed: STUDENT_LINK_FAILED },
+  studentButton: { label: "Student link", section: "students", failed: STUDENT_LINK_FAILED },
+  code: { label: "Workspace code", section: "students", failed: "Couldn’t copy the workspace code. Select it and press Ctrl+C (⌘C on a Mac)." },
+  editField: { label: "Edit link", section: "editors", failed: EDIT_LINK_FAILED },
+  editButton: { label: "Edit link", section: "editors", failed: EDIT_LINK_FAILED },
+};
 
 type Share = {
   userId: string;
@@ -381,7 +395,8 @@ export default function AccessShare({
   // A link created during this page session (memory only, never browser storage).
   freshToken: string;
   onFreshToken: (token: string) => void;
-  copy: (value: string, label: string) => void;
+  // Resolves true when the clipboard holds the value.
+  copy: (value: string, label: string) => Promise<boolean>;
   onLinkChange: (exists: boolean) => void;
   onAccessChange: () => void;
   onClose: () => void;
@@ -392,6 +407,25 @@ export default function AccessShare({
   const [error, setError] = useState("");
   const [accessBusy, setAccessBusy] = useState(false);
   const [accessError, setAccessError] = useState("");
+  // Which copy control just copied (green "Copied!" for about 2 s, as in the Folder Sharing
+  // popup), or why copying failed (shown in that control's section).
+  const [copied, setCopied] = useState<CopyControl | null>(null);
+  const [copyError, setCopyError] = useState<{ section: "students" | "editors"; message: string } | null>(null);
+  const copiedTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(copiedTimer.current), []);
+  async function copyValue(control: CopyControl, value: string) {
+    const { label, section, failed } = COPY_CONTROLS[control];
+    clearTimeout(copiedTimer.current);
+    setCopied(null);
+    setCopyError(null);
+    if (await copy(value, label)) {
+      setCopied(control);
+      copiedTimer.current = setTimeout(() => setCopied(null), 2000);
+    } else {
+      setCopyError({ section, message: failed });
+    }
+  }
+  const copiedClass = (control: CopyControl) => (copied === control ? " copied" : "");
   async function changeVisibility(next: "link" | "private") {
     setAccessBusy(true);
     setAccessError("");
@@ -429,6 +463,11 @@ export default function AccessShare({
   // Managers see the active link (just created, or fetched); guests see the one they used.
   const token = canShare ? freshToken || storedToken : editorToken;
   const editorLink = token ? base + "/edit/" + token + lesson : "";
+  // A replaced or revoked Edit Link is no longer what was copied: drop its confirmation.
+  useEffect(() => {
+    setCopied((current) => (current === "editField" || current === "editButton" ? null : current));
+    setCopyError((current) => (current?.section === "editors" ? null : current));
+  }, [editorLink]);
   async function manage(method: "POST" | "DELETE") {
     setBusy(true);
     setError("");
@@ -511,31 +550,38 @@ export default function AccessShare({
               onFocus={(e) => e.target.select()}
             />
             <button
-              className="icon-button"
+              className={"icon-button" + copiedClass("studentField")}
               aria-label="Copy student link"
-              onClick={() => copy(studentLink, "Student link")}
+              title={copied === "studentField" ? "Copied!" : undefined}
+              onClick={() => void copyValue("studentField", studentLink)}
             >
-              <Copy size={17} />
+              {copied === "studentField" ? <Check size={17} /> : <Copy size={17} />}
             </button>
           </div>
         </label>
         <button
-          className="button secondary full"
-          onClick={() => copy(studentLink, "Student link")}
+          className={"button secondary full" + copiedClass("studentButton")}
+          onClick={() => void copyValue("studentButton", studentLink)}
         >
-          <Link size={16} />
-          Copy Student Link
+          {copied === "studentButton" ? <Check size={16} /> : <Link size={16} />}
+          {copied === "studentButton" ? "Copied!" : "Copy Student Link"}
         </button>
         <div className="share-room-code">
           Workspace code <code>{id}</code>
           <button
-            className="icon-button"
+            className={"icon-button" + copiedClass("code")}
             aria-label="Copy workspace code"
-            onClick={() => copy(id, "Workspace code")}
+            title={copied === "code" ? "Copied!" : undefined}
+            onClick={() => void copyValue("code", id)}
           >
-            <Copy size={14} />
+            {copied === "code" ? <Check size={14} /> : <Copy size={14} />}
           </button>
         </div>
+        {copyError?.section === "students" && (
+          <p className="error share-error copy-error" role="alert">
+            {copyError.message}
+          </p>
+        )}
       </section>
       {(canShare || editorToken) && (
         <section className="access-share-section private-access" aria-label="Editors">
@@ -571,13 +617,14 @@ export default function AccessShare({
                     {show ? <EyeOff size={16} /> : <Eye size={16} />}
                   </button>
                   <button
-                    className="icon-button"
+                    className={"icon-button" + copiedClass("editField")}
                     aria-label="Copy edit link"
+                    title={copied === "editField" ? "Copied!" : undefined}
                     // Not while a replace or revoke is in flight: this link is about to stop working.
                     disabled={busy}
-                    onClick={() => copy(editorLink, "Edit link")}
+                    onClick={() => void copyValue("editField", editorLink)}
                   >
-                    <Copy size={17} />
+                    {copied === "editField" ? <Check size={17} /> : <Copy size={17} />}
                   </button>
                 </div>
               </label>
@@ -588,13 +635,18 @@ export default function AccessShare({
                 </p>
               )}
               <button
-                className="button secondary full"
+                className={"button secondary full" + copiedClass("editButton")}
                 disabled={busy}
-                onClick={() => copy(editorLink, "Edit link")}
+                onClick={() => void copyValue("editButton", editorLink)}
               >
-                <Link size={16} />
-                Copy Edit Link
+                {copied === "editButton" ? <Check size={16} /> : <Link size={16} />}
+                {copied === "editButton" ? "Copied!" : "Copy Edit Link"}
               </button>
+              {copyError?.section === "editors" && (
+                <p className="error share-error copy-error" role="alert">
+                  {copyError.message}
+                </p>
+              )}
             </>
           ) : (
             canShare && (
@@ -659,6 +711,10 @@ export default function AccessShare({
       )}
       {canShare && <PeopleAccess id={id} selfId={selfId} onAccessChange={onAccessChange} />}
       {canShare && <TeamAccess id={id} owner={owner} />}
+      {/* The toast outside the popup is hidden from screen readers while the popup is open. */}
+      <span className="sr-only" aria-live="polite">
+        {copied ? `${COPY_CONTROLS[copied].label} copied` : ""}
+      </span>
     </Modal>
   );
 }
