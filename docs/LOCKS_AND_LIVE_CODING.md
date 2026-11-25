@@ -38,6 +38,15 @@ Locks are enforced by the server on every path, not only in the interface:
 - Filtered copies are not saved: after a server restart, people restricted in a lesson with locked files reconnect once with a fresh copy (their editor reloads briefly). Content is never lost: edits always land in the lesson itself.
 - Releases before locks (d4844ea and earlier) can't enforce them. Roll back only with `scripts/rollback-release.sh` (below), which never starts one of them on a database where locks are in use.
 
+### Known issue (pre-existing, not caused by locks)
+
+**An uploaded image can disappear for folder-only recipients before it is used.** Uploading an image into a lesson records a reference that lets the lesson's folder-only recipients load it. Each save of the lesson keeps only references that some file of the lesson uses. If the lesson is saved between the upload and the moment the image link is placed in a file (for example by another person's edit, 30 ms to 1.5 s later), the fresh reference is dropped, and placing the link afterwards records it without access. Recipients then get 404 for that image until someone who can see it places it again.
+
+- Reproduced deterministically on d4844ea (the release before locks) and on this release, in a workspace without any lock.
+- The backend test "image provenance: pasting an image ID grants a folder-only recipient nothing…" fails intermittently because of it (more often under CPU load).
+- Workspace members and the owner are not affected (they can load every image of the workspace). Nothing is exposed: the failure only ever hides an image.
+- To fix in a later release: keep a just-uploaded reference until the uploader's next save of that lesson (or for a grace period).
+
 ## Live Coding sessions
 
 A session is its own live document (files like a lesson, with the same limits: 64 files, 1 MB per file, 2 MB per session) and its own images. It is never part of a workspace.

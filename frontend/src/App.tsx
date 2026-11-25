@@ -1368,12 +1368,12 @@ function Workspace({
         setPresence(null);
       }
     };
-    // After a reconnect, re-read the tree: notices sent while offline were missed.
-    let firstSync = true;
+    // Whenever this lesson's connection syncs (the first time too), re-read the tree: a change
+    // (a lock released, a file added) announced while it was still connecting, or offline, would
+    // otherwise be missed until the next one.
     const sync = (value: boolean) => {
       setSynced(value);
-      if (value && !firstSync) treeChanged();
-      if (value) firstSync = false;
+      if (value) treeChanged();
     };
     const close = (event: CloseEvent | null) => {
       // What this person may see in the lesson changed (content locked or released): start
