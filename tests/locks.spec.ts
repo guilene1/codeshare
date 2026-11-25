@@ -99,6 +99,29 @@ for (const device of [
   });
 }
 
+test("an inherited lock reads \"Locked\" on one line; where it comes from is in the tooltip only", async ({ page }) => {
+  test.setTimeout(120_000);
+  await signUp(page, "Inherit Owner");
+  await seed(page);
+  await padlock(page, "Week 01 - Linux").click();
+  await page.getByRole("menuitem", { name: "Lock now" }).click();
+  await expect(row(page, "Week 01 - Linux").locator(".lock-status")).toHaveText("Locked");
+  // A file inside the locked folder: the same single-line "Locked", muted, with the reason as a tooltip.
+  const status = row(page, "Introduction.md").locator(".lock-status.inherited");
+  await expect(status).toHaveText("Locked");
+  await expect(page.locator(".course-explorer")).not.toContainText("by parent");
+  const box = await status.boundingBox();
+  const lineHeight = await status.evaluate((el) => parseFloat(getComputedStyle(el).lineHeight));
+  expect(box!.height).toBeLessThan(lineHeight * 1.5);
+  await expect(status).toHaveAttribute("title", "Introduction.md: locked because a parent folder or the workspace is locked");
+  await expect(padlock(page, "Introduction.md")).toHaveAttribute("title", /^Introduction\.md: locked because a parent folder or the workspace is locked/);
+  // Its menu shows "Locked" too, with the same explanation on hover.
+  await padlock(page, "Introduction.md").click();
+  const state = page.locator(".lock-menu-state span");
+  await expect(state).toHaveText("Locked");
+  await expect(state).toHaveAttribute("title", "Locked because a parent folder or the workspace is locked");
+});
+
 test("bulk lock with confirmation, and the lock history records each change", async ({ page }) => {
   test.setTimeout(120_000);
   await signUp(page, "Bulk Owner");

@@ -24,35 +24,32 @@ import {
 } from "../lib";
 
 // Content locks in the Explorer: a padlock before each item's own icon and its availability on
-// the right ("Available", "Locked" with any release date, "Locked by parent"). People who manage
-// locks click the padlock for a menu; everyone else sees the status only. Nothing is shown as
-// done before the server confirms it.
+// the right ("Available", or "Locked" with any release date). Whether a lock comes from a parent
+// is said in the tooltip only. People who manage locks click the padlock for a menu; everyone
+// else sees the status only. Nothing is shown as done before the server confirms it.
 
 export type LockItem = LockTarget & { name: string; lock?: TreeLock };
 export type LockScope = { folderId: string | null; manage: boolean; schedule: boolean; access: boolean };
 
 export function lockLabel(lock: TreeLock | undefined) {
-  if (!lock) return "Available";
-  return lock.state === "inherited" ? "Locked by parent" : "Locked";
+  return lock ? "Locked" : "Available";
 }
+// Tooltip wording for a lock that comes from a locked parent folder or the workspace.
+const INHERITED_TIP = "locked because a parent folder or the workspace is locked";
 const lockState = (lock: TreeLock | undefined) => (!lock ? "available" : lock.state === "inherited" ? "inherited" : "locked");
-// The status on the right of a row: "Available", "Locked" (with "Available from …" underneath
-// when scheduled) or "Locked by parent".
+// The status on the right of a row: "Available" or "Locked" (with "Available from …" underneath
+// when scheduled).
 export function LockLabel({ item }: { item: LockItem }) {
   const { lock } = item;
   const when = lock?.state === "locked" && lock.releaseAt ? lock.releaseAt : null;
   return (
     <>
-      <span className={"lock-status " + lockState(lock)} aria-hidden="true">
-        {/* "Locked by parent" on two lines, so it fits narrow Explorers. */}
-        {lock?.state === "inherited" ? (
-          <>
-            <span>Locked</span>
-            <small>by parent</small>
-          </>
-        ) : (
-          <span>{lockLabel(lock)}</span>
-        )}
+      <span
+        className={"lock-status " + lockState(lock)}
+        aria-hidden="true"
+        title={lock?.state === "inherited" ? `${item.name}: ${INHERITED_TIP}` : undefined}
+      >
+        <span>{lockLabel(lock)}</span>
         {lock?.hidden && <small>Hidden</small>}
       </span>
       {/* The release date gets a line of its own under the row, so it always shows in full. */}
@@ -79,7 +76,7 @@ export function LockToggle({
   const label = lockLabel(lock);
   const when = lock?.state === "locked" && lock.releaseAt ? lock.releaseAt : null;
   const title =
-    (state === "available" ? `${item.name}: available` : `${item.name}: ${label.toLowerCase()}`) +
+    `${item.name}: ${state === "available" ? "available" : state === "inherited" ? INHERITED_TIP : "locked"}` +
     (when ? `. Available from ${releaseLong(when)}` : "") +
     (lock?.hidden ? ". Hidden from students" : "") +
     (manage ? ". Click to manage access" : "");
@@ -154,7 +151,7 @@ export function LockMenu({
       <div className="lock-menu" role="menu" aria-label={`Access to ${item.name}`} style={{ top, left }}>
         <p className="lock-menu-state">
           <strong title={item.name}>{item.name}</strong>
-          <span>
+          <span title={item.lock?.state === "inherited" ? INHERITED_TIP[0].toUpperCase() + INHERITED_TIP.slice(1) : undefined}>
             {lockLabel(item.lock)}
             {scheduled ? ` · from ${releaseShort(item.lock!.releaseAt!)}` : ""}
           </span>
