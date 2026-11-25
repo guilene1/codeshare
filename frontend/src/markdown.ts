@@ -132,7 +132,7 @@ export function imageMarkdown(alt: string, src: string, width?: number) {
 // Workspace images uploaded to Kodelumi; other sources are not loaded (the content
 // security policy would block them, and they could track viewers).
 export const workspaceImage = (src: string) =>
-  /^\/api\/rooms\/[A-Za-z0-9_-]{16}\/images\/[A-Za-z0-9_-]{22}$/.test(src);
+  /^\/api\/(?:rooms|live)\/[A-Za-z0-9_-]{16}\/images\/[A-Za-z0-9_-]{22}$/.test(src);
 
 // `plain` (Plain Text documents): only fenced code blocks and image lines are special;
 // all other text stays literal paragraphs, so "# note" or "- item" are not reformatted.

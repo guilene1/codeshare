@@ -2916,3 +2916,143 @@ span.doc-block-language { display:inline-block; }
 .inline-block-detected, .inline-block-label { white-space: nowrap; flex-shrink: 0; }
 .markdown-code .inline-block-header { flex-wrap: wrap; row-gap: 4px; }
 .markdown-code .inline-block-actions { flex-wrap: wrap; justify-content: flex-end; margin-left: auto; }
+
+/* ---- Content locks (Explorer padlocks, statuses, menu and dialogs). Green: available; amber:
+   locked; muted: locked by a parent. Red stays for errors only. Colors meet 4.5:1 on their
+   backgrounds in both themes. */
+:root { --lock-open: #3fbf8a; --lock-closed: #e0a23b; }
+:root[data-theme="light"] { --lock-open: #157a55; --lock-closed: #9a5d00; }
+.lock-toggle { display:inline-flex; align-items:center; justify-content:center; flex:none; width:20px; height:20px; padding:0; border:0; border-radius:4px; background:transparent; }
+.lock-toggle.available { color:var(--lock-open); }
+.lock-toggle.locked { color:var(--lock-closed); }
+.lock-toggle.inherited { color:var(--muted); }
+button.lock-toggle:hover { background:var(--hover); }
+button.lock-toggle:focus-visible { outline:2px solid var(--accent); outline-offset:-1px; }
+.lock-status { flex:none; display:flex; flex-direction:column; align-items:flex-end; gap:1px; margin-left:auto; padding:0 4px 0 6px; max-width:44%; font-size:10px; line-height:1.25; font-weight:600; text-align:right; white-space:nowrap; }
+.lock-status > span, .lock-status small { overflow:hidden; text-overflow:ellipsis; max-width:100%; }
+.lock-status small { font-size:9.5px; font-weight:450; color:var(--muted); }
+.lock-status.available { color:var(--lock-open); font-weight:500; }
+.lock-status.locked { color:var(--lock-closed); }
+.lock-status.inherited { color:var(--muted); font-weight:450; }
+.folder-row.with-locks { gap:2px; }
+.folder-row.with-locks .folder-open { min-width:0; }
+.tree-file-row.with-locks { display:flex; align-items:center; gap:2px; }
+.tree-file-row.with-locks .tree-file { flex:1; min-width:0; padding:0 6px; }
+.tree-file-row.with-locks.tab-open { padding-right:28px; }
+.tree-file-row.with-locks.tab-open .tree-file { padding-right:6px; }
+.course-root.with-locks > button.lock-toggle { flex:none; padding:0; }
+.course-root.with-locks > .lock-toggle + button { display:flex; align-items:center; gap:7px; flex:1; min-width:0; color:var(--muted); background:transparent; border:0; font:inherit; font-size:11px; text-align:left; padding:8px 5px; }
+.lock-select { flex:none; width:14px; height:14px; margin:0 2px; accent-color:var(--accent-bg); }
+.lock-menu-backdrop { position:fixed; inset:0; z-index:40; }
+.lock-menu { position:fixed; z-index:41; width:220px; max-height:min(340px, calc(100dvh - 16px)); overflow:auto; background:var(--raised); padding:6px; border:1px solid var(--border); border-radius:8px; box-shadow:var(--shadow); }
+.lock-menu-state { display:grid; gap:2px; margin:0 0 4px; padding:4px 7px 8px; border-bottom:1px solid var(--border); font-size:11px; }
+.lock-menu-state strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text); }
+.lock-menu-state span { color:var(--muted); }
+.lock-menu button { display:flex; gap:8px; align-items:center; width:100%; border:0; background:transparent; padding:8px 7px; color:var(--text); font:inherit; font-size:12px; text-align:left; border-radius:4px; }
+.lock-menu button:hover, .lock-menu button:focus-visible { background:var(--hover); outline:none; }
+.lock-bulk-bar { position:sticky; bottom:0; z-index:2; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; margin-top:10px; padding:8px; border:1px solid var(--border); border-radius:8px; background:var(--raised); font-size:12px; }
+.lock-bulk-bar > div { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+.lock-bulk-bar .button { padding:5px 10px; font-size:12px; }
+.lock-dialog fieldset { border:0; padding:0; margin:16px 0 0; min-width:0; }
+.lock-dialog legend { font-size:13px; font-weight:600; margin-bottom:6px; padding:0; }
+.lock-when { display:grid; grid-template-columns:1fr 1fr; gap:0 12px; }
+.lock-when .field { margin:8px 0; }
+.lock-when .lock-zone { grid-column:1 / -1; }
+.lock-visibility label { display:flex; align-items:flex-start; gap:8px; margin-top:8px; font-size:13px; line-height:1.4; }
+.lock-visibility input { margin-top:2px; accent-color:var(--accent-bg); }
+.lock-dialog-target { display:grid; gap:4px; margin:0 0 4px; overflow-wrap:anywhere; }
+.lock-dialog-target span, .lock-dialog-note { color:var(--muted); font-size:12px; line-height:1.5; }
+.lock-dialog-note { margin:16px 0 0; }
+.lock-history { list-style:none; margin:8px 0 0; padding:0; max-height:min(50vh, 420px); overflow:auto; }
+.lock-history li { display:grid; gap:2px; padding:10px 0; border-bottom:1px solid var(--border); font-size:13px; overflow-wrap:anywhere; }
+.lock-history small, .lock-history-name { color:var(--muted); font-size:12px; }
+.lock-permission-options { display:flex; flex-wrap:wrap; gap:8px 18px; margin:4px 0 10px; font-size:13px; }
+.lock-permission-options label { display:flex; gap:7px; align-items:center; }
+.lock-permission-options input { accent-color:var(--accent-bg); }
+.lock-permission-list { margin-top:8px; }
+.lock-permission { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 0; border-top:1px solid var(--border); font-size:13px; }
+.lock-permission small { display:block; margin-top:2px; color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
+.locked-notice > svg { color:var(--lock-closed); }
+.locked-notice .muted { max-width:420px; line-height:1.6; }
+:root[data-theme="light"] .lock-dialog .error, :root[data-theme="light"] .course-explorer .error, :root[data-theme="light"] .live-page .error { color:#b4233a; }
+@media (max-width:560px) {
+  .lock-when { grid-template-columns:1fr; }
+  .lock-status { max-width:40%; }
+}
+
+/* ---- Live Coding sessions (dashboard section and session page). */
+.live-pill { display:inline-flex; align-items:center; gap:6px; flex:none; padding:4px 10px; border-radius:999px; font-size:11px; font-weight:700; letter-spacing:.6px; border:1px solid var(--border); color:var(--muted); white-space:nowrap; }
+.live-pill.live { color:#fff; background:#c2334d; border-color:#c2334d; }
+.live-pill.paused { color:var(--lock-closed); border-color:currentColor; }
+.live-pill.ended, .live-pill.archived { color:var(--muted); }
+.live-pill.draft { color:var(--accent); border-color:transparent; background:var(--accent-soft); }
+.live-pill .live-viewers { display:inline-flex; align-items:center; gap:4px; font-weight:600; letter-spacing:0; }
+.live-page .workspace-nav { gap:12px; }
+.live-page .nav-right { gap:8px; }
+.live-page .room-title strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:34vw; display:block; }
+.live-banner { display:flex; align-items:center; gap:9px; padding:9px 18px; border-bottom:1px solid var(--border); background:var(--raised); color:var(--muted); font-size:13px; }
+.live-banner svg { color:var(--lock-closed); flex:none; }
+.live-files { padding:0 9px; flex:1; overflow:auto; }
+.live-file .tree-file { padding:0 10px; }
+.live-file.active .tree-file { background:var(--accent-soft); color:var(--text); border-color:#8383f123; }
+.live-empty { padding:10px; font-size:12px; line-height:1.6; }
+.live-follow { display:flex; gap:8px; align-items:center; margin:8px 16px; font-size:12px; color:var(--muted); }
+.live-follow input, .live-check input { accent-color:var(--accent-bg); }
+.live-association { margin:6px 16px; font-size:11px; color:var(--faint); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.live-footer { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:8px 14px; border-top:1px solid var(--border); background:var(--surface); flex-shrink:0; }
+.live-saved { font-size:12px; color:var(--lock-open); }
+.live-saved.saving { color:var(--muted); }
+.live-footer .button { padding:6px 12px; font-size:12px; }
+.text-button.copied { color:var(--lock-open); }
+.live-copy-file { padding:4px 6px; }
+.live-locked { color:var(--lock-closed); }
+.live-check { display:flex; gap:8px; align-items:center; margin:12px 0; font-size:13px; }
+.live-settings-section { margin-top:22px; padding-top:16px; border-top:1px solid var(--border); }
+.live-settings-section h3 { font-size:14px; margin:0 0 6px; }
+.live-settings-section .muted { font-size:12px; line-height:1.6; margin:0 0 10px; }
+.dialog-actions.start { justify-content:flex-start; }
+.live-invite { display:flex; gap:8px; margin:8px 0; }
+.live-invite input { flex:1; min-width:0; }
+.live-tabs { gap:6px; }
+.live-tabs button { display:inline-flex; align-items:center; gap:7px; background:transparent; border:1px solid var(--border); border-radius:999px; padding:6px 12px; color:var(--muted); font-size:12px; font-weight:550; }
+.live-tabs button.active { color:var(--text); border-color:var(--accent); background:var(--accent-soft); }
+.live-tabs button span { font-size:11px; color:var(--faint); }
+.live-card { display:flex; flex-direction:column; }
+.live-card h3 { margin:12px 0 6px; font-size:15px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.live-card .workspace-description { flex:1; }
+.live-card-top { display:flex; align-items:center; gap:10px; }
+.live-card-viewers { display:inline-flex; align-items:center; gap:4px; color:var(--muted); font-size:12px; }
+.live-card-menu { margin-left:auto; }
+.live-card-actions { display:flex; gap:12px; align-items:center; }
+.live-card-actions .text-button { padding:2px 0; }
+.live-dashboard .dashboard-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+.center-state.live-page { text-align:center; padding:20px 16px; }
+.center-state.live-page .muted { max-width:440px; line-height:1.6; }
+@media (max-width:900px) {
+  .live-page .live-copy-link span, .live-page .live-end span { display:none; }
+  .live-page .room-title strong { max-width:28vw; }
+}
+@media (max-width:560px) {
+  .live-page .workspace-nav { gap:6px; overflow-x:auto; }
+  .live-page .workspace-back span, .live-page .nav-right .button span { display:none; }
+  .live-pill { padding:3px 8px; font-size:10px; }
+  .live-pill .live-viewers { display:none; }
+  .live-grid { grid-template-columns:1fr; }
+  .live-footer { flex-wrap:wrap; }
+}
+/* A narrow Explorer keeps names readable: available items keep their green padlock without
+   the word. Locked statuses and "Available from" dates always show. */
+.course-explorer { container-type:inline-size; container-name:explorer; }
+@container explorer (max-width: 300px) {
+  .lock-status.available { display:none; }
+  .lock-status { max-width:38%; }
+}
+/* The workspace root's padlock keeps its state color (the root button style would mute it). */
+.course-root.with-locks > .lock-toggle.available { color:var(--lock-open); }
+.course-root.with-locks > .lock-toggle.locked { color:var(--lock-closed); }
+.course-root.with-locks > .lock-toggle.inherited { color:var(--muted); }
+/* A release date sits on its own line under its row, right-aligned under the status. */
+.folder-row.with-locks, .tree-file-row.with-locks { flex-wrap:wrap; }
+.lock-date { flex-basis:100%; margin-top:-5px; padding:0 4px 4px 0; text-align:right; font-size:9.5px; line-height:1.2; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.folder-row.with-locks .lock-date { padding-right:30px; }
+.lock-date { order:1; }

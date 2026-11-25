@@ -15,6 +15,8 @@ import {
 } from "./access.js";
 import { imageIds, recordImageRefs, vouchImages } from "./database.js";
 import { imageInScope } from "./scope.js";
+import { LessonView, type Channel } from "./lessonView.js";
+import { hiddenNames, type LockSnapshot, type Locks, type SocketMode } from "./locks.js";
 import { blockFields, MAX_BLOCKS, orderedBlocks } from "./blocks.js";
 import { templates } from "./templates.js";
 
@@ -69,7 +71,7 @@ export const contentVersion = (text: string) =>
   createHash("sha256").update(text).digest("hex").slice(0, 32);
 // Replaces a file's text with the smallest edit (shared prefix and suffix kept), in one
 // transaction, so open editors keep their cursors and the update stays small.
-export function replaceContent(room: Room, fileId: string, next: string, origin?: unknown) {
+export function replaceContent(room: Pick<Room, "doc">, fileId: string, next: string, origin?: unknown) {
   const item = room.doc.getMap<Y.Map<unknown>>("documents").get(fileId)!;
   const text = item.get("content") as Y.Text,
     current = text.toString();
@@ -133,6 +135,7 @@ export const CONTENT_ACTIONS = [
   "block.deleted",
   "blocks.migrated",
   "image",
+  "live.saved",
 ];
 export type ActivityEntry = {
   id: string;
@@ -184,6 +187,10 @@ export type PresenceSummary = {
 };
 export type Room = {
   id: string;
+  // The lesson's own live document is always "main"; a filtered copy has its own (lessonView.ts).
+  lineage: string;
+  // Set while people restricted by locks are connected to this lesson (see lessonView.ts).
+  view?: LessonView;
   workspaceId: string;
   folderId: string | null;
   name: string;
@@ -231,10 +238,12 @@ export function stripWorkspaceMetadata(doc: Y.Doc) {
     }
   });
 }
-export function validateDocument(doc: Y.Doc) {
+// `extra`: files and bytes of the lesson that aren't in `doc` (a filtered copy leaves locked
+// files out; the lesson's limits still count them).
+export function validateDocument(doc: Y.Doc, extra = { files: 0, bytes: 0 }) {
   const docs = doc.getMap<Y.Map<unknown>>("documents");
-  if (docs.size > 64) throw new Error("A lesson supports up to 64 files.");
-  let size = 0;
+  if (docs.size + extra.files > 64) throw new Error("A lesson supports up to 64 files.");
+  let size = extra.bytes;
   for (const [id, item] of docs) {
     if (
       !(item instanceof Y.Map) ||
@@ -268,7 +277,7 @@ export function validateDocument(doc: Y.Doc) {
     );
 }
 export function addDocument(
-  room: Room,
+  room: Pick<Room, "doc">,
   name: string,
   lang: string,
   content = "",
@@ -308,11 +317,90 @@ export class Rooms {
   private presenceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   // Lesson capacity counters (reported by /api/metrics).
   capacity = { evictions: 0, refusals: 0, evictionFailures: 0 };
+  // Content locks (set by the app): decide which copy of a lesson each socket receives.
+  locks?: Locks;
   constructor(
     public db: DatabaseSync,
     public checkpointMs = 1500,
     public maxRooms = DEFAULT_LESSON_LIMIT,
   ) {}
+  // Every socket connected to a lesson, whichever copy it receives.
+  sockets(room: Room) {
+    return [...room.peers.keys(), ...(room.view?.peers.keys() ?? [])];
+  }
+  peerCount(room: Room) {
+    return room.peers.size + (room.view?.peers.size ?? 0);
+  }
+  // Which copy of this lesson a socket gets, given whether locks restrict this person here.
+  lockMode(room: Room, exempt: (snapshot: import("./locks.js").LockSnapshot) => boolean): SocketMode {
+    if (!this.locks || !this.locks.any(room.workspaceId)) return { mode: "main" };
+    const snapshot = this.locks.snapshot(room.workspaceId);
+    return this.locks.socketMode(
+      snapshot,
+      exempt(snapshot),
+      room.folderId,
+      room.doc.getMap("documents").keys(),
+    );
+  }
+  // The filtered copy for restricted sockets, created on first use and kept current.
+  channelFor(room: Room, mode: SocketMode): Channel {
+    if (mode.mode !== "view") return room;
+    if (!room.view || room.view.stale) {
+      // A stale copy still serving sockets keeps them until they reconnect; new ones get a
+      // fresh copy only once it is gone (one copy per lesson).
+      if (room.view && room.view.peers.size) {
+        room.view.stale = false;
+        room.view.setAccess(mode.blank, mode.hidden);
+        return room.view;
+      }
+      room.view?.destroy();
+      room.view = new LessonView(room.doc, mode.blank, mode.hidden);
+    } else room.view.setAccess(mode.blank, mode.hidden);
+    return room.view;
+  }
+  // A view's last socket left: drop it if nobody restricted needs it any more.
+  viewLeft(room: Room) {
+    if (room.view && !room.view.peers.size && room.view.stale) {
+      room.view.destroy();
+      room.view = undefined;
+    }
+  }
+  // Locks of a workspace changed: every open lesson re-checks who gets which copy. Sockets that
+  // must switch copies (released: filtered -> full; locked: full -> filtered) are closed with
+  // 4001 and reconnect with a fresh document; filtered copies gain or lose files live. Then
+  // every open Explorer re-reads its tree (padlocks and release dates).
+  relock(workspaceId: string) {
+    const locks = this.locks;
+    if (!locks) return;
+    const snapshot = locks.snapshot(workspaceId);
+    const grants = new Map<string, ReturnType<Locks["grants"]>>();
+    const grantsOf = (userId: string | undefined) => {
+      if (!userId) return [];
+      if (!grants.has(userId)) grants.set(userId, locks.grants(workspaceId, userId));
+      return grants.get(userId)!;
+    };
+    for (const room of this.active.values()) {
+      if (room.workspaceId !== workspaceId) continue;
+      const restricted = locks.socketMode(snapshot, false, room.folderId, room.doc.getMap("documents").keys());
+      if (room.view) {
+        if (restricted.mode === "view") {
+          room.view.stale = false;
+          room.view.setAccess(restricted.blank, restricted.hidden);
+        } else room.view.stale = true;
+      }
+      for (const peer of this.sockets(room)) {
+        const live = this.live.get(peer);
+        if (!live) continue;
+        const exempt = locks.exempt(snapshot, { userId: live.userId, owner: live.workspace === "owner" }, room.folderId, grantsOf(live.userId));
+        const want = exempt ? "main" : restricted.mode;
+        const onView = !!room.view?.peers.has(peer);
+        if (want === "hidden" || (want === "main" && onView) || (want === "view" && !onView))
+          peer.close(4001, "Content access changed");
+      }
+      this.viewLeft(room);
+    }
+    this.notifyTree(workspaceId, [null, ...snapshot.parents.keys()]);
+  }
   // Marks a lesson as in use by a request or a connection upgrade until the returned function
   // is called (calling it again does nothing). Held lessons are never unloaded.
   hold(room: Room) {
@@ -326,7 +414,7 @@ export class Rooms {
     };
   }
   private idle(room: Room) {
-    return !room.peers.size && !room.holds;
+    return !this.peerCount(room) && !room.holds;
   }
   // At the lesson limit: unloads the least recently used lesson that nobody is connected to and
   // nothing is using, after saving it. A lesson whose save fails stays in memory, unchanged,
@@ -424,6 +512,7 @@ export class Rooms {
     }
     const room: Room = {
       id,
+      lineage: "main",
       workspaceId,
       folderId,
       name,
@@ -495,6 +584,8 @@ export class Rooms {
   private announce(workspaceId: string, action: string, id: string) {
     if (!this.sendJson || !CONTENT_ACTIONS.includes(action)) return;
     let row: Record<string, unknown> | undefined;
+    // People locks restrict never hear about items hidden from them (by name, as rows carry).
+    let snapshot: LockSnapshot | undefined | null = null;
     for (const [peer, live] of this.live)
       if (live.workspaceId === workspaceId && this.canSeePresence(peer)) {
         row ??= this.db
@@ -502,7 +593,15 @@ export class Rooms {
             "SELECT id,action,label,created_at,actor_name,actor_kind FROM activity WHERE id=?",
           )
           .get(id);
-        if (row) this.sendJson(peer, { activity: activityEntry(row) });
+        if (!row) continue;
+        if (snapshot === null) snapshot = this.locks?.any(workspaceId) ? this.locks.snapshot(workspaceId) : undefined;
+        if (snapshot && live.workspace !== "owner") {
+          const grants = this.locks!.grants(workspaceId, live.userId);
+          const exempt = (folderId: string | null) =>
+            this.locks!.exempt(snapshot!, { userId: live.userId, owner: false }, folderId, grants);
+          if (hiddenNames(snapshot, exempt, this.db).has(String(row.label))) continue;
+        }
+        this.sendJson(peer, { activity: activityEntry(row) });
       }
   }
   // One "file.edited" row per file and person per EDIT_WINDOW_MS: later edits in the window
@@ -851,7 +950,7 @@ export class Rooms {
   collect() {
     const now = Date.now();
     for (const [id, room] of this.active) {
-      if (room.peers.size) {
+      if (this.peerCount(room)) {
         room.touched = now;
         this.db
           .prepare("UPDATE rooms SET last_activity=? WHERE id=?")
@@ -878,6 +977,8 @@ export class Rooms {
         .run(room.touched, room.workspaceId);
     if (room.timer) clearTimeout(room.timer);
     room.timer = undefined;
+    room.view?.destroy();
+    room.view = undefined;
     room.dispose?.();
     room.awareness.destroy();
     room.awarenessOwners.clear();
@@ -888,7 +989,7 @@ export class Rooms {
     for (const timer of this.presenceTimers.values()) clearTimeout(timer);
     this.presenceTimers.clear();
     for (const room of this.active.values()) {
-      for (const peer of room.peers.keys())
+      for (const peer of this.sockets(room))
         peer.close(1001, "Server restarting");
       try {
         this.release(room);

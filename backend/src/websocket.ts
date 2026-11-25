@@ -4,14 +4,14 @@ import * as decoding from "lib0/decoding";
 import * as sync from "y-protocols/sync";
 import * as awareness from "y-protocols/awareness";
 import { WebSocket, WebSocketServer } from "ws";
-import type { Server } from "node:http";
+import type { Server, IncomingMessage } from "node:http";
+import type { Duplex } from "node:stream";
 import {
   MAX_CONTENT,
   Rooms,
   scopeKeyOf,
   validateDocument,
   type Actor,
-  type Room,
 } from "./rooms.js";
 import {
   canEditAccess,
@@ -23,8 +23,9 @@ import {
   type Auth,
 } from "./access.js";
 import type { Accounts } from "./auth.js";
+import type { Channel } from "./lessonView.js";
 
-function send(peer: WebSocket, data: Uint8Array) {
+export function send(peer: WebSocket, data: Uint8Array) {
   if (peer.readyState === WebSocket.OPEN) {
     if (peer.bufferedAmount > 4 * 1024 * 1024)
       peer.close(1013, "Slow connection");
@@ -32,17 +33,23 @@ function send(peer: WebSocket, data: Uint8Array) {
   }
 }
 // Message type 4 (Kodelumi): JSON presence and activity, sent only to Owners and Editors.
-const MESSAGE_JSON = 4;
+export const MESSAGE_JSON = 4;
 // Message type 5 (Kodelumi): data-free JSON notices for every socket of a workspace, such as
 // {"tree":true} when its folders or files change; clients re-read over REST.
-const MESSAGE_NOTICE = 5;
-function awarenessMessage(room: Room, ids: number[]) {
+export const MESSAGE_NOTICE = 5;
+export function awarenessMessage(ch: Channel, ids: number[]) {
   const enc = encoding.createEncoder();
   encoding.writeVarUint(enc, 1);
   encoding.writeVarUint8Array(
     enc,
-    awareness.encodeAwarenessUpdate(room.awareness, ids),
+    awareness.encodeAwarenessUpdate(ch.awareness, ids),
   );
+  return encoding.toUint8Array(enc);
+}
+export function noticeMessage(notice: unknown) {
+  const enc = encoding.createEncoder();
+  encoding.writeVarUint(enc, MESSAGE_NOTICE);
+  encoding.writeVarString(enc, JSON.stringify(notice));
   return encoding.toUint8Array(enc);
 }
 // View-only (and untracked) sockets receive Editors' states (classroom cursors) but never
@@ -50,20 +57,20 @@ function awarenessMessage(room: Room, ids: number[]) {
 // A view-only socket may see Editors' states and its own, never another viewer's. Its own echo
 // matters: y-websocket reconnects a client that receives nothing for 30 seconds, and the 15 s
 // renewal of its own state is what keeps an otherwise quiet viewer connected.
-const visibleTo = (room: Room, peer: WebSocket) => (id: number) =>
-  !room.viewerIds.has(id) || room.awarenessOwners.get(id) === peer;
-function sendAwareness(rooms: Rooms, room: Room, peer: WebSocket, ids: number[]) {
-  const visible = rooms.canSeePresence(peer) ? ids : ids.filter(visibleTo(room, peer));
-  if (visible.length) send(peer, awarenessMessage(room, visible));
+const visibleTo = (ch: Channel, peer: WebSocket) => (id: number) =>
+  !ch.viewerIds.has(id) || ch.awarenessOwners.get(id) === peer;
+function sendAwareness(rooms: Rooms, ch: Channel, peer: WebSocket, ids: number[]) {
+  const visible = rooms.canSeePresence(peer) ? ids : ids.filter(visibleTo(ch, peer));
+  if (visible.length) send(peer, awarenessMessage(ch, visible));
 }
-function wire(rooms: Rooms, room: Room) {
-  if (room.dispose) return;
+export function wireChannel(ch: Channel, canSeePresence: (peer: WebSocket) => boolean, allowed: (peer: WebSocket) => boolean = () => true) {
+  if (ch.dispose) return;
   const update = (data: Uint8Array) => {
     const enc = encoding.createEncoder();
     encoding.writeVarUint(enc, 0);
     sync.writeUpdate(enc, data);
-    for (const peer of room.peers.keys())
-      send(peer, encoding.toUint8Array(enc));
+    const message = encoding.toUint8Array(enc);
+    for (const peer of ch.peers.keys()) if (allowed(peer)) send(peer, message);
   };
   const presence = (
     {
@@ -74,41 +81,158 @@ function wire(rooms: Rooms, room: Room) {
     origin: unknown,
   ) => {
     if (origin instanceof WebSocket) {
-      const ids = room.peers.get(origin);
+      const ids = ch.peers.get(origin);
       added.forEach((id) => ids?.add(id));
       removed.forEach((id) => ids?.delete(id));
     }
-    removed.forEach((id) => room.awarenessOwners.delete(id));
+    removed.forEach((id) => ch.awarenessOwners.delete(id));
     const ids = [...added, ...updated, ...removed],
-      editorIds = ids.filter((id) => !room.viewerIds.has(id));
+      editorIds = ids.filter((id) => !ch.viewerIds.has(id));
     let full: Uint8Array | undefined, editorsOnly: Uint8Array | undefined;
-    for (const peer of room.peers.keys()) {
-      if (rooms.canSeePresence(peer)) {
-        full ??= awarenessMessage(room, ids);
+    for (const peer of ch.peers.keys()) {
+      if (canSeePresence(peer)) {
+        full ??= awarenessMessage(ch, ids);
         send(peer, full);
-      } else if (ids.some((id) => room.viewerIds.has(id) && room.awarenessOwners.get(id) === peer)) {
+      } else if (ids.some((id) => ch.viewerIds.has(id) && ch.awarenessOwners.get(id) === peer)) {
         // This viewer's own update: echo it back (with any Editors' states).
-        send(peer, awarenessMessage(room, ids.filter(visibleTo(room, peer))));
+        send(peer, awarenessMessage(ch, ids.filter(visibleTo(ch, peer))));
       } else {
         if (!editorIds.length) continue;
-        editorsOnly ??= awarenessMessage(room, editorIds);
+        editorsOnly ??= awarenessMessage(ch, editorIds);
         send(peer, editorsOnly);
       }
     }
-    removed.forEach((id) => room.viewerIds.delete(id));
+    removed.forEach((id) => ch.viewerIds.delete(id));
   };
-  room.doc.on("update", update);
-  room.awareness.on("update", presence);
-  room.dispose = () => {
-    room.doc.off("update", update);
-    room.awareness.off("update", presence);
+  ch.doc.on("update", update);
+  ch.awareness.on("update", presence);
+  ch.dispose = () => {
+    ch.doc.off("update", update);
+    ch.awareness.off("update", presence);
   };
 }
+// Checks an untrusted live update against a channel's document before it touches live state:
+// only file text may change (files, their names and fields, code blocks and the other maps go
+// through the REST APIs), and every lesson limit holds. Returns the files whose text changed.
+export function checkUpdate(doc: Y.Doc, data: Uint8Array, extra = { files: 0, bytes: 0 }) {
+  const candidate = new Y.Doc();
+  const before = doc.getMap<Y.Map<unknown>>("documents"),
+    changed: string[] = [],
+    beforeTexts: string[] = [],
+    afterTexts: string[] = [];
+  try {
+    Y.applyUpdate(candidate, Y.encodeStateAsUpdate(doc));
+    Y.applyUpdate(candidate, data);
+    validateDocument(candidate, extra);
+    // "catalog" and "workspace" stay empty (workspace metadata is REST-only), so
+    // a client can never write a tree or name into a lesson others receive.
+    for (const [name, message] of [
+      ["catalog", "Use the course API"],
+      ["codeBlocks", "Use the code block API"],
+      ["workspace", "Use the workspace API"],
+      ["migrations", "Use the migration API"],
+    ] as const)
+      if (JSON.stringify(candidate.getMap(name).toJSON()) !== JSON.stringify(doc.getMap(name).toJSON()))
+        throw new Error(message);
+    const after = candidate.getMap<Y.Map<unknown>>("documents");
+    if (after.size !== before.size) throw new Error("Use the file API");
+    for (const [id, d] of before) {
+      const a = after.get(id);
+      for (const key of ["id", "filename", "language", "createdAt", "updatedAt", "position"])
+        if (a?.get(key) !== d.get(key)) throw new Error("Use the file API");
+      const was = (d.get("content") as Y.Text).toString(),
+        now = (a!.get("content") as Y.Text).toString();
+      if (now !== was) {
+        changed.push(id);
+        beforeTexts.push(was);
+        afterTexts.push(now);
+      }
+    }
+  } finally {
+    candidate.destroy();
+  }
+  return { changed, beforeTexts, afterTexts };
+}
+// Awareness from one socket, filtered: only the socket's own client IDs, and a state built from
+// the verified credential (never browser-supplied roles).
+export function acceptAwareness(
+  ch: Channel,
+  peer: WebSocket,
+  data: Uint8Array,
+  editing: boolean,
+  verifiedName: string | undefined,
+  onGuestName?: (name: string) => void,
+) {
+  if (data.byteLength > 2 * 1024 * 1024) throw new Error("Presence too large");
+  const check = decoding.createDecoder(data),
+    n = decoding.readVarUint(check);
+  // Each encoded state needs at least an ID, clock and string length.
+  // Bound malformed batches by their payload, not classroom size.
+  if (n > Math.floor(data.byteLength / 3)) throw new Error("Invalid presence batch");
+  const accepted: Array<{ id: number; clock: number; json: string }> = [];
+  for (let i = 0; i < n; i++) {
+    const id = decoding.readVarUint(check),
+      clock = decoding.readVarUint(check),
+      json = decoding.readVarString(check);
+    // y-websocket echoes remote awareness updates. Ignore other sockets' identities.
+    const owner = ch.awarenessOwners.get(id);
+    const ownedElsewhere = !!owner && owner !== peer;
+    const ids = ch.peers.get(peer)!;
+    if (ownedElsewhere || (ids.size && !ids.has(id))) continue;
+    const state = JSON.parse(json);
+    if (!ids.size && state === null) continue;
+    // Private-link guests need not send presence metadata (y-websocket's default
+    // state is {}): without a usable name they appear as a neutral "Guest editor".
+    const guestName =
+      typeof state?.user?.name === "string" && state.user.name.trim() && state.user.name.length <= 40
+        ? (state.user.name as string)
+        : "Guest editor";
+    if (state !== null) {
+      ids.add(id);
+      ch.awarenessOwners.set(id, peer);
+      if (!editing) ch.viewerIds.add(id);
+      if (editing && !verifiedName) onGuestName?.(guestName);
+    }
+    // Roles are generated from the verified socket credential, never browser state.
+    const safeState =
+      state === null
+        ? null
+        : editing
+          ? {
+              user: {
+                // Signed-in editors are shown by their verified account name.
+                name: verifiedName ? verifiedName.slice(0, 40) : guestName,
+                color: /^#[0-9a-f]{6}$/i.test(state.user?.color) ? state.user.color : "#a78bfa",
+              },
+              fileId: typeof state.fileId === "string" ? state.fileId.slice(0, 80) : undefined,
+              selection: state.selection,
+              role: "editor",
+            }
+          : { viewer: true, role: "viewer" };
+    accepted.push({ id, clock, json: JSON.stringify(safeState) });
+  }
+  if (!accepted.length) return false;
+  const filtered = encoding.createEncoder();
+  encoding.writeVarUint(filtered, accepted.length);
+  for (const item of accepted) {
+    encoding.writeVarUint(filtered, item.id);
+    encoding.writeVarUint(filtered, item.clock);
+    encoding.writeVarString(filtered, item.json);
+  }
+  awareness.applyAwarenessUpdate(ch.awareness, encoding.toUint8Array(filtered), peer);
+  return true;
+}
+// Which copy of a lesson the client already holds (the `doc` URL parameter): null for clients
+// from before this existed, "new" for a fresh document, else the lineage it last received.
+const LINEAGE = /^(new|main|v[\w-]{16})$/;
+
 export function setupWebsocket(
   server: Server,
   rooms: Rooms,
   origins: Set<string>,
   accounts: Accounts,
+  // Other live endpoints (Live Coding sessions) handle their own paths first.
+  extra?: (req: IncomingMessage, socket: Duplex, head: Buffer, wss: WebSocketServer) => boolean,
 ) {
   const wss = new WebSocketServer({
     noServer: true,
@@ -136,13 +260,9 @@ export function setupWebsocket(
     encoding.writeVarString(enc, JSON.stringify(payload));
     send(peer, encoding.toUint8Array(enc));
   };
-  rooms.sendNotice = (peer, notice) => {
-    const enc = encoding.createEncoder();
-    encoding.writeVarUint(enc, MESSAGE_NOTICE);
-    encoding.writeVarString(enc, JSON.stringify(notice));
-    send(peer, encoding.toUint8Array(enc));
-  };
+  rooms.sendNotice = (peer, notice) => send(peer, noticeMessage(notice));
   server.on("upgrade", (req, socket, head) => {
+    if (req.headers.origin && origins.has(req.headers.origin) && extra?.(req, socket, head, wss)) return;
     const match = /^\/ws\/([A-Za-z0-9_-]{16})$/.exec(
       (req.url ?? "").split("?")[0],
     );
@@ -152,11 +272,12 @@ export function setupWebsocket(
       return;
     }
     try {
-      const folder = new URL(req.url!, "http://localhost").searchParams.get(
-        "folder",
-      );
+      const params = new URL(req.url!, "http://localhost").searchParams;
+      const folder = params.get("folder");
       if (folder && !/^[\w-]{36}$/.test(folder))
         throw new Error("Invalid lesson");
+      const lineage = params.get("doc");
+      if (lineage !== null && !LINEAGE.test(lineage)) throw new Error("Invalid document");
       const workspaceId = match[1];
       const credentials = (req.headers["sec-websocket-protocol"] ?? "")
         .split(",")
@@ -193,7 +314,8 @@ export function setupWebsocket(
       // Checked before the lesson is loaded: a private workspace without a grant looks
       // exactly like one that doesn't exist, and is never loaded into memory. It runs before
       // the link check, so a fake or revoked link can't tell "private" from "missing" either.
-      if (!canReadAccess(access())) {
+      const opened = rights();
+      if (!canReadAccess(opened.access)) {
         socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
         socket.destroy();
         return;
@@ -213,16 +335,41 @@ export function setupWebsocket(
         socket.destroy();
         return;
       }
+      // Content locks: the lesson itself, its filtered copy, or (hidden) nothing at all.
+      const mode = rooms.lockMode(room, (snapshot) =>
+        rooms.locks!.exempt(snapshot, { userId: session?.user.id, owner: opened.workspace === "owner" }, room.folderId),
+      );
+      if (mode.mode === "hidden") {
+        socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
+        socket.destroy();
+        return;
+      }
       // Held until the socket joins the lesson (or the upgrade fails), so it can't be unloaded
       // in between to make space for another lesson.
       const joined = rooms.hold(room);
       socket.once("close", joined);
       wss.handleUpgrade(req, socket, head, (peer) => {
-        wire(rooms, room);
-        room.peers.set(peer, new Set());
+        const ch = rooms.channelFor(room, mode);
+        const view = ch === room ? undefined : room.view;
+        // A client still holding another copy of this lesson (it was released or locked
+        // meanwhile, or the server rebuilt its copy) starts over with a fresh document, so two
+        // unrelated copies are never merged. Clients from before copies existed send no `doc`:
+        // they keep the lesson itself, and are asked to reload for a filtered copy.
+        if (lineage === null && view) {
+          joined();
+          peer.close(1008, "Kodelumi was updated. Reload the page to continue.");
+          return;
+        }
+        if (lineage !== null && lineage !== "new" && lineage !== ch.lineage) {
+          joined();
+          peer.close(4001, "Content access changed");
+          rooms.viewLeft(room);
+          return;
+        }
+        wireChannel(ch, (p) => rooms.canSeePresence(p));
+        ch.peers.set(peer, new Set());
         joined();
         rooms.connections.set(peer, { ...auth, workspaceId: room.workspaceId });
-        const opened = rights();
         rooms.live.set(peer, {
           workspaceId: room.workspaceId,
           room,
@@ -236,6 +383,8 @@ export function setupWebsocket(
               ? scopeKeyOf(folderScope(rooms.db, room.workspaceId, session.user.id))
               : undefined,
         });
+        // Which copy this is, so a reconnect can say what it holds (first, before any sync).
+        if (lineage !== null) send(peer, noticeMessage({ doc: ch.lineage }));
         rooms.schedulePresence(room.workspaceId);
         room.touched = Date.now();
         let alive = true,
@@ -281,7 +430,7 @@ export function setupWebsocket(
                 encoding.writeVarUint(enc, 0);
                 sync.writeSyncStep2(
                   enc,
-                  room.doc,
+                  ch.doc,
                   decoding.readVarUint8Array(dec),
                 );
                 send(peer, encoding.toUint8Array(enc));
@@ -290,65 +439,15 @@ export function setupWebsocket(
                   throw new Error(
                     "View-only access: document changes are not permitted",
                   );
-                const data = decoding.readVarUint8Array(dec),
-                  candidate = new Y.Doc();
-                const before = room.doc.getMap<Y.Map<unknown>>("documents"),
-                  changed: string[] = [],
-                  beforeTexts: string[] = [],
-                  afterTexts: string[] = [];
+                if (view?.isBlank) throw new Error("This content is locked.");
+                const data = decoding.readVarUint8Array(dec);
                 // Validate a candidate before applying untrusted CRDT updates to live state.
-                try {
-                  Y.applyUpdate(candidate, Y.encodeStateAsUpdate(room.doc));
-                  Y.applyUpdate(candidate, data);
-                  validateDocument(candidate);
-                  // "catalog" and "workspace" stay empty (workspace metadata is REST-only), so
-                  // a client can never write a tree or name into a lesson others receive.
-                  if (
-                    JSON.stringify(candidate.getMap("catalog").toJSON()) !==
-                    JSON.stringify(room.doc.getMap("catalog").toJSON())
-                  )
-                    throw new Error("Use the course API");
-                  if (
-                    JSON.stringify(candidate.getMap("codeBlocks").toJSON()) !==
-                    JSON.stringify(room.doc.getMap("codeBlocks").toJSON())
-                  )
-                    throw new Error("Use the code block API");
-                  if (
-                    JSON.stringify(candidate.getMap("workspace").toJSON()) !==
-                    JSON.stringify(room.doc.getMap("workspace").toJSON())
-                  )
-                    throw new Error("Use the workspace API");
-                  if (
-                    JSON.stringify(candidate.getMap("migrations").toJSON()) !==
-                    JSON.stringify(room.doc.getMap("migrations").toJSON())
-                  )
-                    throw new Error("Use the migration API");
-                  const after = candidate.getMap<Y.Map<unknown>>("documents");
-                  if (after.size !== before.size)
-                    throw new Error("Use the file API");
-                  for (const [id, d] of before) {
-                    const a = after.get(id);
-                    for (const key of [
-                      "id",
-                      "filename",
-                      "language",
-                      "createdAt",
-                      "updatedAt",
-                      "position",
-                    ])
-                      if (a?.get(key) !== d.get(key))
-                        throw new Error("Use the file API");
-                    const was = (d.get("content") as Y.Text).toString(),
-                      now = (a!.get("content") as Y.Text).toString();
-                    if (now !== was) {
-                      changed.push(id);
-                      beforeTexts.push(was);
-                      afterTexts.push(now);
-                    }
-                  }
-                } finally {
-                  candidate.destroy();
-                }
+                // A filtered copy's limits count the files it leaves out.
+                const { changed, beforeTexts, afterTexts } = checkUpdate(
+                  ch.doc,
+                  data,
+                  view ? { files: view.hiddenFiles().size, bytes: view.hiddenBytes() } : undefined,
+                );
                 // Image links this person added count for the lesson's folder-only recipients
                 // only if this person could already see those images (Rooms.vouchAdded).
                 // Only live edits (subtype 2) vouch: a reconnecting client's SyncStep2 may
@@ -358,107 +457,35 @@ export function setupWebsocket(
                     canSeeAll: () => canReadAccess(rights().workspace),
                     userId: session?.user.id,
                   });
-                Y.applyUpdate(room.doc, data, peer);
+                Y.applyUpdate(ch.doc, data, peer);
+                // Timestamps live on the lesson itself (a filtered copy follows it).
+                const files = room.doc.getMap<Y.Map<unknown>>("documents");
                 room.doc.transact(() => {
-                  for (const id of changed)
-                    before.get(id)?.set("updatedAt", Date.now());
+                  for (const id of changed) files.get(id)?.set("updatedAt", Date.now());
                 });
                 for (const id of changed) rooms.noteEdit(room, id, actor);
               } else throw new Error("Unsupported sync message");
             } else if (type === 1) {
-              const data = decoding.readVarUint8Array(dec);
-              if (data.byteLength > 2 * 1024 * 1024)
-                throw new Error("Presence too large");
-              const check = decoding.createDecoder(data),
-                n = decoding.readVarUint(check);
-              // Each encoded state needs at least an ID, clock and string length.
-              // Bound malformed batches by their payload, not classroom size.
-              if (n > Math.floor(data.byteLength / 3))
-                throw new Error("Invalid presence batch");
               const editing = canEdit();
-              const accepted: Array<{
-                id: number;
-                clock: number;
-                json: string;
-              }> = [];
-              for (let i = 0; i < n; i++) {
-                const id = decoding.readVarUint(check),
-                  clock = decoding.readVarUint(check),
-                  json = decoding.readVarString(check);
-                // y-websocket echoes remote awareness updates. Ignore other sockets' identities.
-                const owner = room.awarenessOwners.get(id);
-                const ownedElsewhere = !!owner && owner !== peer;
-                const ids = room.peers.get(peer)!;
-                if (ownedElsewhere || (ids.size && !ids.has(id))) continue;
-                const state = JSON.parse(json);
-                if (!ids.size && state === null) continue;
-                // Private-link guests need not send presence metadata (y-websocket's default
-                // state is {}): without a usable name they appear as a neutral "Guest editor".
-                const guestName =
-                  typeof state?.user?.name === "string" &&
-                  state.user.name.trim() &&
-                  state.user.name.length <= 40
-                    ? (state.user.name as string)
-                    : "Guest editor";
-                if (state !== null) {
-                  ids.add(id);
-                  room.awarenessOwners.set(id, peer);
-                  if (!editing) room.viewerIds.add(id);
+              const accepted = acceptAwareness(
+                ch,
+                peer,
+                decoding.readVarUint8Array(dec),
+                editing,
+                session?.user.displayName,
+                (guestName) => {
                   // A link guest's typed name is shown live to Owners and Editors only.
                   const live = rooms.live.get(peer);
-                  if (
-                    live &&
-                    editing &&
-                    !session &&
-                    live.name !== guestName
-                  ) {
+                  if (live && live.name !== guestName) {
                     live.name = guestName;
                     rooms.schedulePresence(room.workspaceId);
                   }
-                }
-                // Roles are generated from the verified socket credential, never browser state.
-                const safeState =
-                  state === null
-                    ? null
-                    : editing
-                      ? {
-                          user: {
-                            // Signed-in editors are shown by their verified account name.
-                            name: session
-                              ? session.user.displayName.slice(0, 40)
-                              : guestName,
-                            color: /^#[0-9a-f]{6}$/i.test(state.user?.color)
-                              ? state.user.color
-                              : "#a78bfa",
-                          },
-                          fileId:
-                            typeof state.fileId === "string"
-                              ? state.fileId.slice(0, 80)
-                              : undefined,
-                          selection: state.selection,
-                          role: "editor",
-                        }
-                      : { viewer: true, role: "viewer" };
-                accepted.push({ id, clock, json: JSON.stringify(safeState) });
-              }
-              if (accepted.length) {
-                countAccepted();
-                const filtered = encoding.createEncoder();
-                encoding.writeVarUint(filtered, accepted.length);
-                for (const item of accepted) {
-                  encoding.writeVarUint(filtered, item.id);
-                  encoding.writeVarUint(filtered, item.clock);
-                  encoding.writeVarString(filtered, item.json);
-                }
-                awareness.applyAwarenessUpdate(
-                  room.awareness,
-                  encoding.toUint8Array(filtered),
-                  peer,
-                );
-              }
+                },
+              );
+              if (accepted) countAccepted();
             } else if (type === 3) {
-              sendAwareness(rooms, room, peer, [
-                ...room.awareness.getStates().keys(),
+              sendAwareness(rooms, ch, peer, [
+                ...ch.awareness.getStates().keys(),
               ]);
             }
           } catch (error) {
@@ -475,16 +502,17 @@ export function setupWebsocket(
           rooms.connections.delete(peer);
           rooms.live.delete(peer);
           rooms.schedulePresence(room.workspaceId);
-          const ids = room.peers.get(peer);
-          for (const id of ids ?? []) room.awarenessOwners.delete(id);
-          room.peers.delete(peer);
+          const ids = ch.peers.get(peer);
+          for (const id of ids ?? []) ch.awarenessOwners.delete(id);
+          ch.peers.delete(peer);
           awareness.removeAwarenessStates(
-            room.awareness,
+            ch.awareness,
             [...(ids ?? [])],
             null,
           );
           room.touched = Date.now();
-          if (!room.peers.size && room.dirty)
+          if (view) rooms.viewLeft(room);
+          if (!rooms.peerCount(room) && room.dirty)
             try {
               rooms.save(room);
             } catch (error) {
@@ -494,11 +522,11 @@ export function setupWebsocket(
         });
         const enc = encoding.createEncoder();
         encoding.writeVarUint(enc, 0);
-        sync.writeSyncStep1(enc, room.doc);
+        sync.writeSyncStep1(enc, ch.doc);
         // A viewer only pulls server state; do not request its potentially modified local document.
-        if (canEdit()) send(peer, encoding.toUint8Array(enc));
-        const states = [...room.awareness.getStates().keys()];
-        if (states.length) sendAwareness(rooms, room, peer, states);
+        if (canEdit() && !view?.isBlank) send(peer, encoding.toUint8Array(enc));
+        const states = [...ch.awareness.getStates().keys()];
+        if (states.length) sendAwareness(rooms, ch, peer, states);
       });
     } catch {
       socket.write(

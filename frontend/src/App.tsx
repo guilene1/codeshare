@@ -46,6 +46,7 @@ import {
   FolderInput,
   PanelRight,
   UserPlus,
+  Lock,
 } from "lucide-react";
 import * as Y from "yjs";
 import * as decoding from "lib0/decoding";
@@ -74,6 +75,7 @@ import { plural, type Activity, type PresenceSummary } from "./workspaces";
 import { fence, imageMarkdown, insertBlock, isDocumentLanguage } from "./markdown";
 import { BRAND, Logo, LogoMark, TAGLINE } from "./brand";
 import CourseExplorer from "./components/CourseExplorer";
+import type { LockScope } from "./components/ContentLocks";
 import ExplorerResizer, { clampExplorerWidth } from "./components/ExplorerResizer";
 import SidebarSplitter, { PEOPLE_MIN } from "./components/SidebarSplitter";
 import WorkspaceActivity from "./components/WorkspaceActivity";
@@ -90,15 +92,18 @@ import {
   storeLocal,
   imageUrl,
   uploadImage,
+  releaseLong,
   type FileDoc,
   type CodeBlock,
   type CourseTree,
+  type LockTarget,
   type Settings,
   type UploadedImage,
 } from "./lib";
 import ImageDialog from "./components/ImageDialog";
 import { altFor, type FoundImages } from "./documentImages";
 const CodeEditor = lazy(() => import("./components/CodeEditor"));
+const LiveSession = lazy(() => import("./components/LiveSession"));
 type RoomInfo = {
   id: string;
   name: string;
@@ -115,6 +120,8 @@ type RoomInfo = {
   scoped?: boolean;
   ownerName?: string | null;
   folders?: Array<{ id: string; name: string; role: FolderRole }>;
+  // The owner, and accounts the owner allowed to manage locks.
+  canManageLocks?: boolean;
 };
 type FolderRole = "viewer" | "editor";
 // The server's reply, normalized: a folder-only recipient's info has no workspace name.
@@ -229,6 +236,9 @@ export default function App() {
   );
   const roomRoute =
     /^\/(?:room|w)\/([\w-]{16})(?:\/edit\/([\w-]{43}))?\/?$/.exec(route);
+  // Live Coding: viewers open /live/<link>; the owner and collaborators /live-sessions/<id>.
+  const liveRoute = /^\/live\/([\w-]{43})\/?$/.exec(route),
+    liveSessionRoute = /^\/live-sessions\/([\w-]{16})\/?$/.exec(route);
   const needsAccount = route === "/workspaces" || route === "/account";
   useEffect(() => {
     if (!ready) return;
@@ -256,6 +266,27 @@ export default function App() {
         navigate={navigate}
         notify={notify}
       />
+    );
+  else if (liveRoute || liveSessionRoute)
+    page = (
+      <Suspense
+        fallback={
+          <div className="center-state">
+            <Logo />
+            <Loader2 size={28} className="spin" />
+          </div>
+        }
+      >
+        <LiveSession
+          key={route}
+          token={liveRoute?.[1]}
+          sessionId={liveSessionRoute?.[1]}
+          navigate={navigate}
+          notify={notify}
+          dark={dark}
+          themeButton={themeButton}
+        />
+      </Suspense>
     );
   else if (route === "/signin") page = <SignIn navigate={navigate} notify={notify} />;
   else if (route === "/signup") page = <SignUp navigate={navigate} notify={notify} />;
@@ -687,7 +718,13 @@ function Workspace({
     [activityLoading, setActivityLoading] = useState(false),
     [status, setStatus] = useState("connecting"),
     [synced, setSynced] = useState(false),
-    [saved, setSaved] = useState(true);
+    [saved, setSaved] = useState(true),
+    // Content locks: where this person manages them (null: not a lock manager, or not loaded),
+    // a locked file someone tried to open, and a counter that restarts the live connection with
+    // a fresh document when the server says the content this person may see changed (4001).
+    [lockScopes, setLockScopes] = useState<LockScope[] | null>(null),
+    [lockedFile, setLockedFile] = useState<{ name: string; releaseAt: number | null } | null>(null),
+    [connectionKey, setConnectionKey] = useState(0);
   const [settings, setSettings] = useState<Settings>(() => ({
       ...defaults,
       ...readLocal<Partial<Settings>>("devshare.settings", {}),
@@ -1114,8 +1151,22 @@ function Workspace({
             setGrants((previous) => previous ?? {});
           })
       : Promise.resolve();
+  // Lock management rights (the owner, and accounts the owner delegated to, in their scope).
+  const loadLockScopes = () =>
+    room?.canManageLocks
+      ? api<{ scopes: LockScope[] }>(`/rooms/${id}/locks`)
+          .then((value) => setLockScopes(value.scopes))
+          .catch(() => setLockScopes(null))
+      : Promise.resolve(setLockScopes(null));
   function openLesson(next: string | null, file?: string) {
     setError("");
+    // A locked file this person can't open: say so (with any release date) instead.
+    const locked = file ? tree.documents.find((d) => d.id === file)?.lock : undefined;
+    if (file && locked && !locked.canOpen) {
+      setLockedFile({ name: tree.documents.find((d) => d.id === file)!.filename, releaseAt: locked.releaseAt });
+      file = undefined;
+      if (next === folder) return;
+    } else setLockedFile(null);
     if (next === folder) {
       if (file) openTab(file);
       return;
@@ -1177,6 +1228,10 @@ function Workspace({
   useEffect(() => {
     if (room) void loadSharedFolders();
   }, [id, canShareFolders]);
+  // Re-read with the tree, since lock permissions can change while the page is open.
+  useEffect(() => {
+    void loadLockScopes();
+  }, [id, room?.canManageLocks, tree]);
   useEffect(() => {
     if (!treeReady) return;
     // A folder-only recipient has no workspace root: a link without a folder, or to a folder
@@ -1208,7 +1263,9 @@ function Workspace({
         awareness: new ClassroomAwareness(doc, !isEditor),
         connect: false,
         disableBc: true,
-        params: folder ? { folder } : {},
+        // doc: which copy of the lesson this document holds ("new" until the server says),
+        // so a reconnect never merges it with a different copy (see the 4001 handling below).
+        params: folder ? { folder, doc: "new" } : { doc: "new" },
         // Owners authenticate with the session cookie; link editors with the link.
         protocols:
           room.access === "editor" && credential
@@ -1319,6 +1376,15 @@ function Workspace({
       if (value) firstSync = false;
     };
     const close = (event: CloseEvent | null) => {
+      // What this person may see in the lesson changed (content locked or released): start
+      // over with a fresh document, and re-read the tree for the new padlocks.
+      if (event?.code === 4001) {
+        p.shouldConnect = false;
+        loadTree().catch(accessEnded);
+        reloadRoom();
+        setConnectionKey((key) => key + 1);
+        return;
+      }
       if (event?.code === 1008) {
         setError(
           event.reason ||
@@ -1369,7 +1435,10 @@ function Workspace({
         tree?: boolean;
         workspace?: boolean;
         folderShares?: boolean;
+        doc?: string;
       };
+      // Which copy of the lesson this is: sent again on every reconnect.
+      if (typeof notice.doc === "string") p.params = { ...p.params, doc: notice.doc };
       if (notice.tree) treeChanged();
       if (notice.workspace) reloadRoom();
       // Sent only to sharing managers: which folders are shared changed (Explorer marks).
@@ -1394,10 +1463,15 @@ function Workspace({
       p.destroy();
       doc.destroy();
     };
-  }, [room?.id, room?.access, joining, credential, folder, isEditor, lessonReady, scopedLessonOk, gone]);
+  }, [room?.id, room?.access, joining, credential, folder, isEditor, lessonReady, scopedLessonOk, gone, connectionKey]);
   useEffect(() => {
     if (current) provider?.awareness.setLocalStateField("fileId", current.id);
   }, [current?.id, provider]);
+  // Choosing another open file leaves a "locked" notice; a released file opens normally.
+  useEffect(() => setLockedFile(null), [active]);
+  useEffect(() => {
+    if (lockedFile && !tree.documents.some((d) => d.filename === lockedFile.name && d.lock && !d.lock.canOpen)) setLockedFile(null);
+  }, [tree]);
   // Recent activity loads on each (re)connect; live changes then arrive over the socket.
   useEffect(() => {
     if (!workspaceEditor || status !== "connected") return;
@@ -1680,6 +1754,33 @@ function Workspace({
       </div>
     );
   const connected = status === "connected" && synced;
+  // Content locks: padlocks show for lock managers, and for everyone once anything is locked.
+  const anyLock = !!tree.workspaceLock || tree.folders.some((f) => f.lock) || tree.documents.some((d) => d.lock);
+  const within = (folderId: string | null, scope: string | null) => {
+    if (scope === null) return true;
+    for (let at = folderId, guard = 0; at && guard < 32; guard++) {
+      if (at === scope) return true;
+      at = tree.folders.find((f) => f.id === at)?.parent_id ?? null;
+    }
+    return false;
+  };
+  const lockRights = (item: LockTarget) => {
+    const lesson =
+      item.kind === "folder" ? item.id : item.kind === "file" ? (tree.documents.find((d) => d.id === item.id)?.folder_id ?? null) : null;
+    const covering = (lockScopes ?? []).filter(
+      (scope) => scope.manage && (item.kind === "workspace" ? scope.folderId === null : within(lesson, scope.folderId)),
+    );
+    return { manage: covering.length > 0, schedule: covering.some((scope) => scope.schedule) };
+  };
+  const explorerLocks =
+    !scoped && (!!lockScopes?.length || anyLock)
+      ? { show: true, labels: anyLock, owner: isOwner, rights: lockRights, notify }
+      : scoped && anyLock
+        ? { show: true, labels: true, owner: false, rights: () => ({ manage: false, schedule: false }), notify }
+        : undefined;
+  // The open lesson, when it is locked for this person: a notice instead of the editor.
+  const lessonLock = folder ? tree.folders.find((f) => f.id === folder)?.lock : tree.workspaceLock;
+  const lessonClosed = !!lessonLock && !lessonLock.canOpen;
   // The open file's views are tied to the shared document its text belongs to: a reconnect
   // with new rights (e.g. Viewer upgraded to Editor) brings a new document, and once its text
   // arrives they remount on it instead of staying bound to the old copy.
@@ -1877,6 +1978,8 @@ function Workspace({
               onShare={canShareFolders ? setShareFolder : undefined}
               sharedFolders={canShareFolders ? sharedFolders : undefined}
               connected={connected}
+              workspaceId={scoped ? undefined : id}
+              locks={explorerLocks}
               onOpen={openLesson}
               request={async (path, method, body) => {
                 const result = await roomApi("/rooms/" + id + path, method, body);
@@ -2318,7 +2421,28 @@ function Workspace({
                     : "")
                 }
               >
-                {provider &&
+                {lessonClosed || lockedFile ? (
+                  // Locked content (visible but not yet released): what it is and when it opens.
+                  <div className="editor-loading">
+                    <div className="empty-lesson locked-notice" role="status">
+                      <Lock size={30} />
+                      <p>
+                        {lockedFile
+                          ? `${lockedFile.name} is locked.`
+                          : folder
+                            ? `${tree.folders.find((f) => f.id === folder)?.name ?? "This folder"} is locked.`
+                            : "This workspace is locked."}
+                      </p>
+                      <p className="muted">
+                        {(lockedFile?.releaseAt ?? (lessonClosed ? lessonLock?.releaseAt : null))
+                          ? `Available from ${releaseLong((lockedFile?.releaseAt ?? lessonLock?.releaseAt)!)}. It opens here automatically.`
+                          : lessonLock?.state === "inherited" && !lockedFile
+                            ? "It's inside locked content. It opens when your instructor releases it."
+                            : "It opens here as soon as your instructor releases it."}
+                      </p>
+                    </div>
+                  </div>
+                ) : provider &&
                 current &&
                 isDocumentLanguage(current.language) &&
                 markdownMode === "preview" ? (

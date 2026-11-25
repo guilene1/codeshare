@@ -41,8 +41,21 @@ import {
   type Access,
   type ShareRole,
 } from "./access.js";
-import { classify, imageInScope, scopedInfo, scopedTree } from "./scope.js";
+import { classify, imageInScope, scopedInfo, scopedTree, type Target } from "./scope.js";
 import { FolderSharing } from "./folderSharing.js";
+import {
+  hiddenNames,
+  imageUnlocked,
+  isLockKind,
+  isLockVisibility,
+  lockTree,
+  Locks,
+  targetName,
+  zonedToUtc,
+  type LockKind,
+  type LockSnapshot,
+} from "./locks.js";
+import { liveRoutes, LiveSessions } from "./live.js";
 import {
   Accounts,
   csrfFor,
@@ -74,6 +87,68 @@ import {
   type CodeBlock,
 } from "./blocks.js";
 
+// The refusal for a request that touches locked content, or undefined when it may proceed.
+// Hidden content answers exactly like content that doesn't exist (404); visibly locked content
+// says it is locked (423) with its release date, if any. Folder changes inside a locked lesson
+// are refused, and so is deleting a folder that holds locked content (nobody restricted may
+// remove what they can't see).
+const LOCKED_MESSAGE = "This content is locked. It becomes available when your instructor releases it.";
+function lockRefusal(
+  snapshot: LockSnapshot,
+  exempt: (folderId: string | null) => boolean,
+  target: Target,
+  method: string,
+  path: string,
+): { status: number; body: Record<string, unknown> } | undefined {
+  const lesson = (folderId: string | null, missing = "Lesson folder not found.") => {
+    if (exempt(folderId)) return undefined;
+    const state = snapshot.folderState(folderId);
+    if (!state.locked) return undefined;
+    if (state.hidden && folderId !== null) return { status: 404, body: { error: missing } };
+    return { status: 423, body: { error: LOCKED_MESSAGE, locked: true, releaseAt: state.own?.releaseAt ?? null } };
+  };
+  if (target.kind === "lesson") {
+    const refused = lesson(target.folderId);
+    if (refused) return refused;
+    const parts = path.split("/").filter(Boolean);
+    if (parts[0] === "documents" && parts[1] && parts[1] !== "order") {
+      const folder = snapshot.fileFolder.has(parts[1]) ? (snapshot.fileFolder.get(parts[1]) ?? null) : target.folderId;
+      if (exempt(folder)) return undefined;
+      const state = snapshot.fileState(parts[1], folder);
+      if (!state.locked) return undefined;
+      if (state.hidden) return { status: 404, body: { error: "File not found." } };
+      return { status: 423, body: { error: LOCKED_MESSAGE, locked: true, releaseAt: state.own?.releaseAt ?? null } };
+    }
+    return undefined;
+  }
+  if (target.kind === "upload") return lesson(target.folderId);
+  if (target.kind === "manage") {
+    const parent = lesson(target.parentId);
+    if (parent) return parent;
+    if (!target.folderId) return undefined;
+    const own = lesson(target.folderId, "Folder not found.");
+    if (own) return own;
+    if (method === "DELETE" && !exempt(target.folderId) && snapshot.lockInside(target.folderId))
+      return { status: 423, body: { error: "This folder holds locked content, so it can't be deleted.", locked: true } };
+  }
+  return undefined;
+}
+// A new order for items of which a person restricted by locks sees only some: the items they
+// see take the order they asked for, in the slots those items had; everything else stays put.
+function mergeOrder(current: string[], visible: Set<string>, requested: string[]) {
+  const queue = [...requested];
+  return current.map((id) => (visible.has(id) ? queue.shift()! : id));
+}
+// A whole number from an environment variable within [min, max], else the default (with a
+// warning), so a typo can't remove a limit or stop the server from starting.
+function boundedEnv(value: string | undefined, fallback: number, min: number, max: number) {
+  if (value === undefined || value.trim() === "") return fallback;
+  const n = Number(value);
+  if (/^\d+$/.test(value.trim()) && n >= min && n <= max) return n;
+  console.warn(`Expected a whole number from ${min} to ${max}; using ${fallback}.`);
+  return fallback;
+}
+
 export function createApp(
   options: {
     dbPath?: string;
@@ -101,6 +176,13 @@ export function createApp(
   );
   const images = new Images(rooms.db);
   const links = new LinkVault(dbPath);
+  // Content locks: every change (manual or a scheduled release) re-checks the workspace's live
+  // sockets at once and refreshes open Explorers. Overdue releases are processed at startup.
+  const locks = new Locks(rooms.db, (workspaceId) => {
+    rooms.relock(workspaceId);
+    live?.workspaceChanged(workspaceId);
+  });
+  rooms.locks = locks;
   const origins = new Set(
     options.origins ??
       (
@@ -128,6 +210,14 @@ export function createApp(
   );
   outbox.recover();
   outbox.kick();
+  // Live Coding sessions (live.ts): their own bounded set of loaded sessions and viewers.
+  const live: LiveSessions = new LiveSessions(rooms.db, accounts, links, locks, {
+    maxSessions: boundedEnv(process.env.MAX_LIVE_SESSIONS, 8, 1, 64),
+    maxViewers: boundedEnv(process.env.MAX_LIVE_VIEWERS, 300, 1, 2000),
+    checkpointMs: options.checkpointMs ?? 1500,
+  });
+  locks.releaseDue();
+  locks.schedule();
   // One startup line to confirm the email setup; it never includes the key itself.
   if (mail.enabled && !options.mailer)
     console.log(
@@ -261,14 +351,16 @@ export function createApp(
       lessonEvictionFailures: rooms.capacity.evictionFailures,
       lessonRefusals: rooms.capacity.refusals,
       websocketConnections: [...rooms.active.values()].reduce(
-        (sum, session) => sum + session.peers.size,
+        (sum, session) => sum + rooms.peerCount(session),
         0,
       ),
       sessions: [...rooms.active.values()].map((session) => ({
         workspaceId: session.workspaceId,
         folderId: session.folderId,
-        connections: session.peers.size,
+        connections: rooms.peerCount(session),
+        ...(session.view ? { filteredConnections: session.view.peers.size } : {}),
       })),
+      liveSessions: live.metrics(),
       persistedWorkspaces: Number(
         rooms.db.prepare("SELECT COUNT(*) AS n FROM rooms").get()?.n,
       ),
@@ -277,6 +369,13 @@ export function createApp(
   accountRoutes(app, accounts, rooms, origins, outbox, {
     ...authLimits(),
     ...options.authLimits,
+  });
+  liveRoutes(app, live, {
+    rooms,
+    accounts,
+    workspaceImages: images,
+    locks,
+    record: (workspaceId, action, label, actor) => rooms.record(workspaceId, action, label, actor),
   });
   teamRoutes(app, rooms.db, (workspaceId) => {
     rooms.revalidate(
@@ -421,12 +520,49 @@ export function createApp(
       });
       return;
     }
+    // Content locks (only in workspaces that have any): who may open what. The owner and
+    // delegates with locked-content access (in their scope) are exempt; everyone else is
+    // refused locked lessons, files, folder changes and images, the same way on every route.
+    const who = { userId: session?.user.id, owner: workspace === "owner" };
+    const lockGrants = locks.grants(workspaceId, who.userId);
+    res.locals.lockGrants = lockGrants;
+    res.locals.lockPrincipal = who;
+    let lockSnapshot: LockSnapshot | undefined;
+    let lockExempt = (_folderId: string | null) => true;
+    if (locks.any(workspaceId)) {
+      const snapshot = (lockSnapshot = locks.snapshot(workspaceId));
+      lockExempt = (folderId) => locks.exempt(snapshot, who, folderId, lockGrants);
+      const refusal = lockRefusal(snapshot, lockExempt, target, req.method, req.path);
+      if (refusal) {
+        res.status(refusal.status).json(refusal.body);
+        return;
+      }
+      if (
+        target.kind === "image" &&
+        !who.owner &&
+        !imageUnlocked(
+          rooms.db,
+          snapshot,
+          lockExempt,
+          (folderId) => canReadAccess(workspace) || (folderId !== null && folderScopeOf().has(folderId)),
+          target.imageId,
+        )
+      ) {
+        res.status(404).json({ error: "Image not found." });
+        return;
+      }
+    }
+    res.locals.lockSnapshot = lockSnapshot;
+    res.locals.lockExempt = lockExempt;
+    // Lock details (visibility, time zone) for the people who manage locks.
+    const lockDetail = who.owner || lockGrants.some((g) => g.manage);
+    res.locals.lockDetail = lockDetail;
     // Folder-only recipients: their own view of the workspace, nothing beyond their folders.
     if (!canReadAccess(workspace) && (target.kind === "info" || target.kind === "tree")) {
       res.json(
         target.kind === "info"
           ? scopedInfo(rooms.db, workspaceId, folderScopeOf())
-          : scopedTree(rooms.db, workspaceId, folderScopeOf()),
+          : lockTree(scopedTree(rooms.db, workspaceId, folderScopeOf()), lockSnapshot, lockExempt, lockDetail),
       );
       return;
     }
@@ -481,6 +617,8 @@ export function createApp(
       ...(res.locals.canShare
         ? { hasEditorLink: !!room.has_editor_link }
         : {}),
+      // Lock management (the owner, and accounts the owner delegated to); never sent otherwise.
+      ...(res.locals.lockDetail ? { canManageLocks: true } : {}),
     });
   });
   // The caller's own folder grants in this workspace (each granted folder and everything inside
@@ -551,10 +689,302 @@ export function createApp(
         ...(cursor ? [before, before, beforeId] : []),
         limit + 1,
       );
+    // People locks restrict don't see activity naming items hidden from them.
+    const snapshot = res.locals.lockSnapshot as LockSnapshot | undefined;
+    const hidden = snapshot ? hiddenNames(snapshot, res.locals.lockExempt, rooms.db) : undefined;
     res.json({
-      entries: rows.slice(0, limit).map(activityEntry),
+      entries: rows
+        .slice(0, limit)
+        .filter((row) => !hidden?.has(String(row.label)))
+        .map(activityEntry),
       hasMore: rows.length > limit,
     });
+  });
+  // ---- Content locks: managed by the workspace owner and by accounts the owner delegates to,
+  // within their scope (lock_permissions). Delegation itself is the owner's alone. These routes
+  // check their own rights (a delegate may be a workspace Viewer), so they come before the
+  // general view-only guard below. Every change is one transaction, recorded in the lock
+  // history, and applied to live sessions at once (Locks.changed -> Rooms.relock).
+  const lockChanges = rateLimit({
+    windowMs: 10 * 60_000,
+    limit: 240,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+    message: { error: "Too many lock changes. Wait a few minutes and try again." },
+  });
+  const lockRows = (workspaceId: string) =>
+    rooms.db
+      .prepare(
+        "SELECT target_kind AS kind,target_id AS id,visibility,release_at AS releaseAt,release_zone AS zone,created_at AS createdAt,updated_at AS updatedAt FROM content_locks WHERE workspace_id=? ORDER BY created_at,target_id",
+      )
+      .all(workspaceId);
+  const lockManager = (res: express.Response) => {
+    const session = res.locals.session as Session | undefined;
+    if (!session || !res.locals.lockDetail) {
+      res.status(404).json({ error: "Endpoint not found." });
+      return undefined;
+    }
+    return { kind: "user" as const, id: session.user.id, name: session.user.displayName };
+  };
+  const formatRelease = (at: number, zone: string) =>
+    new Intl.DateTimeFormat("en-US", { timeZone: zone, dateStyle: "medium", timeStyle: "short" }).format(at) + ` (${zone})`;
+  app.get("/api/rooms/:roomId/locks", (_req, res) => {
+    if (!lockManager(res)) return;
+    const who = res.locals.lockPrincipal as { owner: boolean };
+    res.json({
+      owner: who.owner,
+      // Where this person manages locks (null: the whole workspace).
+      scopes: who.owner
+        ? [{ folderId: null, manage: true, schedule: true, access: true }]
+        : res.locals.lockGrants,
+      locks: lockRows(res.locals.workspace.id),
+    });
+  });
+  app.get("/api/rooms/:roomId/locks/history", (req, res) => {
+    if (!lockManager(res)) return;
+    const kind = req.query.kind,
+      id = req.query.id;
+    const target =
+      isLockKind(kind) && typeof id === "string" && /^[\w-]{16,36}$/.test(id) ? { kind, id } : undefined;
+    res.json({ events: locks.history(res.locals.workspace.id, target, 100) });
+  });
+  app.put("/api/rooms/:roomId/locks", lockChanges, (req, res) => {
+    const actor = lockManager(res);
+    if (!actor) return;
+    const workspaceId = res.locals.workspace.id as string;
+    const body = (req.body ?? {}) as Record<string, any>;
+    const action = body.action;
+    if (!["lock", "unlock", "schedule", "cancel", "visibility"].includes(action))
+      throw new Error("Choose whether to lock, unlock or schedule.");
+    if (!Array.isArray(body.targets) || !body.targets.length || body.targets.length > 500)
+      throw new Error("Choose what to lock or unlock.");
+    const snapshot = locks.snapshot(workspaceId);
+    const who = res.locals.lockPrincipal,
+      grants = res.locals.lockGrants;
+    const seen = new Set<string>();
+    const targets: Array<{ kind: LockKind; id: string }> = [];
+    for (const raw of body.targets) {
+      if (!raw || !isLockKind(raw.kind) || (raw.kind !== "workspace" && typeof raw.id !== "string"))
+        throw new Error("Choose what to lock or unlock.");
+      const target = { kind: raw.kind as LockKind, id: raw.kind === "workspace" ? workspaceId : String(raw.id) };
+      const exists =
+        target.kind === "workspace" ||
+        (target.kind === "folder" ? snapshot.parents.has(target.id) : snapshot.fileFolder.has(target.id));
+      if (!exists) {
+        res.status(404).json({ error: "One of these items no longer exists. Refresh and try again." });
+        return;
+      }
+      const key = target.kind + ":" + target.id;
+      if (!seen.has(key)) {
+        seen.add(key);
+        targets.push(target);
+      }
+    }
+    const release = action === "schedule" || (action === "lock" && body.release) ? body.release : undefined;
+    for (const target of targets) {
+      if (!locks.canManage(snapshot, who, target.kind, target.id, grants)) {
+        res.status(403).json({ error: "You can't manage locks for one of these items." });
+        return;
+      }
+      if ((release || action === "cancel") && !locks.canSchedule(snapshot, who, target.kind, target.id, grants)) {
+        res.status(403).json({ error: "You can't schedule releases for one of these items." });
+        return;
+      }
+    }
+    let releaseAt: number | null = null,
+      zone: string | null = null;
+    if (release) {
+      releaseAt = zonedToUtc(release.date, release.time, release.timeZone);
+      zone = release.timeZone as string;
+      if (releaseAt <= Date.now() + 30_000) throw new Error("Choose a release time in the future.");
+    }
+    if (body.visibility !== undefined && !isLockVisibility(body.visibility))
+      throw new Error("Choose whether locked content is shown or hidden.");
+    const visibility = body.visibility as "visible" | "hidden" | undefined;
+    if (action === "visibility" && !visibility) throw new Error("Choose whether locked content is shown or hidden.");
+    const now = Date.now();
+    const upsert = rooms.db.prepare(
+      `INSERT INTO content_locks (workspace_id,target_kind,target_id,visibility,release_at,release_zone,created_by,created_at,updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id,target_kind,target_id) DO UPDATE SET
+       visibility=excluded.visibility, release_at=excluded.release_at, release_zone=excluded.release_zone, updated_at=excluded.updated_at`,
+    );
+    let changed = 0;
+    rooms.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const target of targets) {
+        const existing = snapshot.rows.get(target.kind + ":" + target.id);
+        const named = { ...target, name: targetName(rooms.db, workspaceId, target.kind, target.id) };
+        const shown = visibility ?? existing?.visibility ?? "visible";
+        if (action === "lock" || action === "schedule") {
+          const at = releaseAt ?? (action === "lock" ? (existing?.releaseAt ?? null) : null);
+          const atZone = releaseAt !== null ? zone : (existing?.zone ?? null);
+          upsert.run(workspaceId, target.kind, target.id, shown, at, atZone, actor.id, existing?.createdAt ?? now, now);
+          changed++;
+          if (!existing) locks.record(workspaceId, named, "locked", shown === "hidden" ? "Hidden until released" : "Name and status shown", actor);
+          else if (existing.visibility !== shown)
+            locks.record(workspaceId, named, "visibility", shown === "hidden" ? "Hidden until released" : "Name and status shown", actor);
+          if (releaseAt !== null)
+            locks.record(workspaceId, named, existing?.releaseAt ? "rescheduled" : "scheduled", "Available from " + formatRelease(releaseAt, zone!), actor);
+        } else if (action === "unlock") {
+          if (!existing) continue;
+          rooms.db
+            .prepare("DELETE FROM content_locks WHERE workspace_id=? AND target_kind=? AND target_id=?")
+            .run(workspaceId, target.kind, target.id);
+          changed++;
+          locks.record(workspaceId, named, "unlocked", "Unlocked now", actor);
+        } else if (action === "cancel") {
+          if (!existing?.releaseAt) continue;
+          rooms.db
+            .prepare("UPDATE content_locks SET release_at=NULL,release_zone=NULL,updated_at=? WHERE workspace_id=? AND target_kind=? AND target_id=?")
+            .run(now, workspaceId, target.kind, target.id);
+          changed++;
+          locks.record(workspaceId, named, "schedule.canceled", "Stays locked until unlocked", actor);
+        } else if (action === "visibility") {
+          if (!existing || existing.visibility === shown) continue;
+          rooms.db
+            .prepare("UPDATE content_locks SET visibility=?,updated_at=? WHERE workspace_id=? AND target_kind=? AND target_id=?")
+            .run(shown, now, workspaceId, target.kind, target.id);
+          changed++;
+          locks.record(workspaceId, named, "visibility", shown === "hidden" ? "Hidden until released" : "Name and status shown", actor);
+        }
+      }
+      rooms.db.exec("COMMIT");
+    } catch (error) {
+      rooms.db.exec("ROLLBACK");
+      throw error;
+    }
+    if (changed) {
+      const verb = { lock: "Locked", unlock: "Unlocked", schedule: "Scheduled", cancel: "Release canceled", visibility: "Visibility changed" }[
+        action as "lock"
+      ];
+      rooms.record(workspaceId, "locks.changed", `${verb}: ${changed} item${changed === 1 ? "" : "s"}`, actor);
+      locks.changed(workspaceId);
+    }
+    res.json({ changed, locks: lockRows(workspaceId) });
+  });
+  // Delegated lock permissions: the owner allows accounts or teams (who already have access
+  // through sharing) to manage locks, schedule releases and open locked content, in the whole
+  // workspace or one folder. They never grant access to anything by themselves.
+  const lockOwner = (res: express.Response) => {
+    if (!(res.locals.lockPrincipal as { owner: boolean }).owner) {
+      res.status(403).json({ error: "Only the workspace owner can choose who manages locks." });
+      return false;
+    }
+    return true;
+  };
+  const permissionList = (workspaceId: string) =>
+    rooms.db
+      .prepare(
+        `SELECT p.id, p.user_id AS userId, u.display_name AS displayName, u.email, p.team_id AS teamId, t.name AS teamName,
+           p.folder_id AS folderId, f.name AS folderName, p.can_manage AS manage, p.can_schedule AS schedule, p.can_access AS access, p.created_at AS createdAt
+         FROM lock_permissions p LEFT JOIN users u ON u.id=p.user_id LEFT JOIN teams t ON t.id=p.team_id LEFT JOIN folders f ON f.id=p.folder_id
+         WHERE p.workspace_id=? ORDER BY p.created_at`,
+      )
+      .all(workspaceId)
+      .map((row) => ({ ...row, manage: row.manage === 1, schedule: row.schedule === 1, access: row.access === 1 }));
+  app.get("/api/rooms/:roomId/lock-permissions", (_req, res) => {
+    if (!lockManager(res) || !lockOwner(res)) return;
+    res.json({ permissions: permissionList(res.locals.workspace.id) });
+  });
+  app.post("/api/rooms/:roomId/lock-permissions", lockChanges, (req, res) => {
+    const actor = lockManager(res);
+    if (!actor || !lockOwner(res)) return;
+    const workspaceId = res.locals.workspace.id as string;
+    const body = (req.body ?? {}) as Record<string, any>;
+    const folderId = body.folderId ?? null;
+    if (
+      folderId !== null &&
+      (typeof folderId !== "string" || !rooms.db.prepare("SELECT 1 FROM folders WHERE id=? AND workspace_id=?").get(folderId, workspaceId))
+    ) {
+      res.status(404).json({ error: "Folder not found." });
+      return;
+    }
+    let userId: string | null = null,
+      teamId: string | null = null,
+      who = "";
+    if (body.teamId !== undefined) {
+      const team = TEAM_ID.test(String(body.teamId))
+        ? rooms.db
+            .prepare("SELECT t.id,t.name FROM team_members m JOIN teams t ON t.id=m.team_id WHERE m.team_id=? AND m.user_id=?")
+            .get(String(body.teamId), actor.id)
+        : undefined;
+      if (!team) {
+        res.status(404).json({ error: "Choose one of your teams." });
+        return;
+      }
+      teamId = team.id as string;
+      who = `Team ${team.name}`;
+    } else {
+      const user = rooms.db.prepare("SELECT id,display_name FROM users WHERE email=?").get(validEmail(body.email));
+      if (!user) {
+        res.status(404).json({ error: "No Kodelumi account uses that email." });
+        return;
+      }
+      if (user.id === actor.id) {
+        res.status(400).json({ error: "You already manage every lock in this workspace." });
+        return;
+      }
+      userId = user.id as string;
+      who = String(user.display_name);
+    }
+    const manage = body.manage !== false,
+      schedule = manage && body.schedule === true,
+      access = body.access !== false;
+    if (!manage && !access) throw new Error("Choose at least one permission.");
+    rooms.db.exec("BEGIN IMMEDIATE");
+    try {
+      rooms.db
+        .prepare("DELETE FROM lock_permissions WHERE workspace_id=? AND user_id IS ? AND team_id IS ? AND folder_id IS ?")
+        .run(workspaceId, userId, teamId, folderId);
+      rooms.db
+        .prepare(
+          "INSERT INTO lock_permissions (id,workspace_id,user_id,team_id,folder_id,can_manage,can_schedule,can_access,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        )
+        .run(randomUUID(), workspaceId, userId, teamId, folderId, manage ? 1 : 0, schedule ? 1 : 0, access ? 1 : 0, actor.id, Date.now());
+      rooms.db.exec("COMMIT");
+    } catch (error) {
+      rooms.db.exec("ROLLBACK");
+      throw error;
+    }
+    const scope = folderId
+      ? { kind: "folder" as const, id: folderId, name: targetName(rooms.db, workspaceId, "folder", folderId) }
+      : { kind: "workspace" as const, id: workspaceId, name: targetName(rooms.db, workspaceId, "workspace", workspaceId) };
+    locks.record(
+      workspaceId,
+      scope,
+      "permission.added",
+      `${who}: ${[manage && "manage locks", schedule && "schedule releases", access && "open locked content"].filter(Boolean).join(", ")}`,
+      actor,
+    );
+    locks.changed(workspaceId);
+    res.status(201).json({ permissions: permissionList(workspaceId) });
+  });
+  app.delete("/api/rooms/:roomId/lock-permissions/:permissionId", lockChanges, (req, res) => {
+    const actor = lockManager(res);
+    if (!actor || !lockOwner(res)) return;
+    const workspaceId = res.locals.workspace.id as string;
+    const row = rooms.db
+      .prepare(
+        "SELECT p.folder_id, COALESCE(u.display_name, 'Team ' || t.name) AS who FROM lock_permissions p LEFT JOIN users u ON u.id=p.user_id LEFT JOIN teams t ON t.id=p.team_id WHERE p.id=? AND p.workspace_id=?",
+      )
+      .get(String(req.params.permissionId), workspaceId);
+    if (!row) {
+      res.status(404).json({ error: "That permission no longer exists." });
+      return;
+    }
+    rooms.db.prepare("DELETE FROM lock_permissions WHERE id=? AND workspace_id=?").run(String(req.params.permissionId), workspaceId);
+    const folderId = (row.folder_id as string | null) ?? null;
+    locks.record(
+      workspaceId,
+      folderId
+        ? { kind: "folder", id: folderId, name: targetName(rooms.db, workspaceId, "folder", folderId) }
+        : { kind: "workspace", id: workspaceId, name: targetName(rooms.db, workspaceId, "workspace", workspaceId) },
+      "permission.removed",
+      String(row.who ?? "Someone"),
+      actor,
+    );
+    locks.changed(workspaceId);
+    res.json({ permissions: permissionList(workspaceId) });
   });
   app.use("/api/rooms/:roomId", (req, res, next) => {
     if (req.method !== "GET" && !res.locals.canEdit) {
@@ -1050,11 +1480,12 @@ export function createApp(
     const id = res.locals.workspace.id;
     for (const session of [...rooms.active.values()])
       if (session.workspaceId === id) {
-        for (const peer of session.peers.keys())
+        for (const peer of rooms.sockets(session))
           peer.close(1008, "Workspace deleted by the instructor");
         rooms.release(session);
       }
     rooms.db.prepare("DELETE FROM rooms WHERE id=?").run(id);
+    live.workspaceDeleted(id);
     res.json({ ok: true });
   });
   // Inline images: anyone with the workspace link can view; only editors upload.
@@ -1108,7 +1539,9 @@ export function createApp(
     }
   });
   app.get("/api/rooms/:roomId/tree", (_req, res) =>
-    res.json(rooms.tree(res.locals.workspace.id)),
+    res.json(
+      lockTree(rooms.tree(res.locals.workspace.id), res.locals.lockSnapshot, res.locals.lockExempt, res.locals.lockDetail),
+    ),
   );
   app.post("/api/rooms/:roomId/folders", (req, res) => {
     const workspaceId = res.locals.workspace.id;
@@ -1172,10 +1605,14 @@ export function createApp(
     const workspaceId = res.locals.workspace.id,
       parent = req.body.parent_id ?? null,
       ids = req.body.ids;
-    const siblings = rooms.db
-      .prepare("SELECT id FROM folders WHERE workspace_id=? AND parent_id IS ?")
+    const all = rooms.db
+      .prepare("SELECT id FROM folders WHERE workspace_id=? AND parent_id IS ? ORDER BY position,id")
       .all(workspaceId, parent)
-      .map((row) => row.id);
+      .map((row) => row.id as string);
+    // Hidden folders aren't listed for people locks restrict: they keep their place.
+    const snapshot = res.locals.lockSnapshot as LockSnapshot | undefined;
+    const exempt = res.locals.lockExempt as (folderId: string | null) => boolean;
+    const siblings = snapshot ? all.filter((id) => exempt(id) || !snapshot.folderState(id).hidden) : all;
     if (
       !Array.isArray(ids) ||
       ids.length !== siblings.length ||
@@ -1183,9 +1620,10 @@ export function createApp(
       ids.some((id) => !siblings.includes(id))
     )
       throw new Error("Provide every sibling folder exactly once.");
+    const order = siblings.length === all.length ? (ids as string[]) : mergeOrder(all, new Set(siblings), ids);
     rooms.db.exec("BEGIN IMMEDIATE");
     try {
-      ids.forEach((id, position) =>
+      order.forEach((id, position) =>
         rooms.db
           .prepare("UPDATE folders SET position=?,updated_at=? WHERE id=?")
           .run(position, Date.now(), id),
@@ -1238,13 +1676,26 @@ export function createApp(
         session.workspaceId === workspaceId &&
         descendants.includes(session.folderId)
       ) {
-        for (const peer of session.peers.keys())
+        for (const peer of rooms.sockets(session))
           peer.close(1008, "Lesson deleted by the instructor");
         rooms.release(session);
       }
+    // Locks of the files inside go with them (folder locks go with the folders, by trigger).
+    const removedFiles = rooms.db
+      .prepare(
+        `SELECT id FROM documents WHERE room_id=? AND folder_id IN (${descendants.map(() => "?").join(",")})`,
+      )
+      .all(workspaceId, ...descendants)
+      .map((row) => row.id as string);
     rooms.db
       .prepare("DELETE FROM folders WHERE id=? AND workspace_id=?")
       .run(req.params.id, workspaceId);
+    const deleteFileLock = rooms.db.prepare(
+      "DELETE FROM content_locks WHERE workspace_id=? AND target_kind='file' AND target_id=?",
+    );
+    let locksRemoved = 0;
+    for (const file of removedFiles) locksRemoved += Number(deleteFileLock.run(workspaceId, file).changes);
+    if (locksRemoved || res.locals.lockSnapshot) locks.changed(workspaceId);
     rooms.record(workspaceId, "folder.deleted", String(folderName), res.locals.actor);
     // Its folder shares went with it (ON DELETE CASCADE): re-check everyone else's rights.
     rooms.revalidate(
@@ -1416,15 +1867,26 @@ export function createApp(
     const room = res.locals.room,
       docs = room.doc.getMap("documents") as Y.Map<Y.Map<unknown>>,
       ids = req.body.ids;
+    // People locks restrict here reorder the files they can open; locked files keep their place.
+    const snapshot = res.locals.lockSnapshot as LockSnapshot | undefined;
+    const exempt = res.locals.lockExempt as (folderId: string | null) => boolean;
+    const current = [...docs.entries()]
+      .sort(([, a], [, b]) => ((a.get("position") as number) ?? 0) - ((b.get("position") as number) ?? 0))
+      .map(([id]) => id);
+    const visible =
+      snapshot && !exempt(room.folderId)
+        ? current.filter((id) => !snapshot.fileState(id, room.folderId).locked)
+        : current;
     if (
       !Array.isArray(ids) ||
-      ids.length !== docs.size ||
-      new Set(ids).size !== docs.size ||
-      ids.some((id) => !docs.has(id))
+      ids.length !== visible.length ||
+      new Set(ids).size !== visible.length ||
+      ids.some((id) => !visible.includes(id))
     )
       throw new Error("Provide every file in this lesson exactly once.");
+    const order = visible.length === current.length ? (ids as string[]) : mergeOrder(current, new Set(visible), ids);
     room.doc.transact(() =>
-      ids.forEach((id, position) => docs.get(id)!.set("position", position)),
+      order.forEach((id, position) => docs.get(id)!.set("position", position)),
     );
     rooms.save(room);
     rooms.notifyTree(room.workspaceId, [room.folderId]);
@@ -1475,6 +1937,13 @@ export function createApp(
     ) as string;
     docs.delete(req.params.id);
     rooms.save(res.locals.room);
+    // A deleted file's lock goes with it.
+    if (
+      rooms.db
+        .prepare("DELETE FROM content_locks WHERE workspace_id=? AND target_kind='file' AND target_id=?")
+        .run(res.locals.room.workspaceId, req.params.id).changes
+    )
+      locks.changed(res.locals.room.workspaceId);
     rooms.record(res.locals.room.workspaceId, "file.deleted", deletedName, res.locals.actor);
     rooms.notifyTree(res.locals.room.workspaceId, [res.locals.room.folderId]);
     res.json({ ok: true });
@@ -1585,10 +2054,19 @@ export function createApp(
     },
   );
   const server = createServer(app),
-    wss = setupWebsocket(server, rooms, origins, accounts);
+    wss = setupWebsocket(server, rooms, origins, accounts, (req, socket, head, ws) =>
+      live.upgrade(req, socket, head, ws),
+    );
   let sweeps = 0;
   const gc = setInterval(() => {
     rooms.collect();
+    live.collect();
+    try {
+      // A safety net for the release timer (a release is applied exactly once either way).
+      locks.releaseDue();
+    } catch (error) {
+      console.error("Scheduled release sweep failed; it runs again shortly.", error);
+    }
     outbox.kick();
     if (++sweeps % 240 === 0) accounts.purgeExpired();
   }, 15_000);
@@ -1601,10 +2079,14 @@ export function createApp(
     accounts,
     folderSharing,
     outbox,
+    locks,
+    live,
     close: async () => {
       if (closed) return;
       closed = true;
       clearInterval(gc);
+      locks.stop();
+      live.close();
       rooms.close();
       for (const peer of wss.clients) peer.terminate();
       wss.close();

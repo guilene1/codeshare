@@ -9,10 +9,16 @@ let credential: string | undefined;
 export function setImageCredential(token: string | undefined) {
   credential = token;
 }
+// Live Coding viewers have the session link (no account): its images load the same way.
+let liveCredential: string | undefined;
+export function setLiveImageCredential(token: string | undefined) {
+  liveCredential = token;
+}
 const workspaceImage = /^\/api\/rooms\/[\w-]{16}\/images\/[\w-]+$/;
+const liveImage = /^\/api\/live\/[\w-]{16}\/images\/[\w-]+$/;
 
 export function useImageSrc(src: string): string | undefined {
-  const token = workspaceImage.test(src) ? credential : undefined;
+  const token = workspaceImage.test(src) ? credential : liveImage.test(src) ? liveCredential : undefined;
   const [shown, setShown] = useState<string | undefined>(token ? undefined : src);
   useEffect(() => {
     if (!token) {

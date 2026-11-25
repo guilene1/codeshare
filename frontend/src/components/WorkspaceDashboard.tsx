@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import Modal from "./Modal";
 import { MyTeams, TeamWorkspaces } from "./Teams";
+import LiveDashboard from "./LiveDashboard";
 import { api, readLocal } from "../lib";
 import {
   activityText,
@@ -34,12 +35,13 @@ import {
 } from "../workspaces";
 
 // The dashboard's sections, kept in the URL (?view=…&team=…) so refresh and Back work.
-type View = "workspaces" | "shared" | "teams" | "team-workspaces";
+type View = "workspaces" | "shared" | "teams" | "team-workspaces" | "live";
 const views: Array<[View, string]> = [
   ["workspaces", "My Workspaces"],
   ["shared", "Shared with Me"],
   ["teams", "My Teams"],
   ["team-workspaces", "Team Workspaces"],
+  ["live", "Live Coding"],
 ];
 const readView = () => {
   const params = new URLSearchParams(location.search);
@@ -254,6 +256,13 @@ export default function WorkspaceDashboard({
       <section className="workspace-dashboard" aria-label="Team Workspaces">
         {nav}
         <TeamWorkspaces open={open} />
+      </section>
+    );
+  if (view === "live")
+    return (
+      <section className="workspace-dashboard" aria-label="Live Coding sessions">
+        {nav}
+        <LiveDashboard navigate={navigate} notify={notify} />
       </section>
     );
   const sharedSection = (

@@ -45,12 +45,24 @@ export type FileDoc = {
   updatedAt: number;
   position?: number;
 };
+// A lock as the Explorer shows it (the server sends it only on locked items). `canOpen`: this
+// person may still open it (the owner, or a delegate with access there). Visibility and time zone
+// come only to the people who manage locks.
+export type TreeLock = {
+  state: "locked" | "inherited";
+  releaseAt: number | null;
+  canOpen?: true;
+  visibility?: "visible" | "hidden";
+  zone?: string | null;
+  hidden?: boolean;
+};
 export type CourseTree = {
   folders: Array<{
     id: string;
     parent_id: string | null;
     name: string;
     position: number;
+    lock?: TreeLock;
   }>;
   documents: Array<{
     id: string;
@@ -58,8 +70,62 @@ export type CourseTree = {
     filename: string;
     language: string;
     position: number;
+    lock?: TreeLock;
   }>;
+  // The workspace's own lock (it locks everything in it).
+  workspaceLock?: TreeLock;
 };
+export type LockTarget = { kind: "workspace" | "folder" | "file"; id: string };
+// A release time, in the viewer's own time zone: "Mar 9" (or "Mar 9, 2028" in another year)
+// and, in full, "Tuesday, March 9, 2027 at 8:00 AM EST".
+export function releaseShort(at: number) {
+  // The year only when the date is far off (or past), so the usual case stays short: "Mar 15".
+  const far = Math.abs(at - Date.now()) > 300 * 86_400_000;
+  return new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric", ...(far ? { year: "numeric" } : {}) });
+}
+export function releaseLong(at: number) {
+  // (dateStyle can't be combined with timeZoneName, so the fields are spelled out.)
+  return new Date(at).toLocaleString(undefined, {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
+}
+export const browserTimeZone = () => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+};
+export function timeZones(): string[] {
+  try {
+    return (Intl as unknown as { supportedValuesOf: (key: string) => string[] }).supportedValuesOf("timeZone");
+  } catch {
+    return ["UTC", browserTimeZone()];
+  }
+}
+// The wall-clock date ("2027-03-15") and time ("08:00") of an instant in a time zone.
+export function wallClock(at: number, zone: string) {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: zone,
+      hourCycle: "h23",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    })
+      .formatToParts(new Date(at))
+      .map((p) => [p.type, p.value]),
+  );
+  return { date: `${parts.year}-${parts.month}-${parts.day}`, time: `${parts.hour}:${parts.minute}` };
+}
 export type CodeBlock = {
   id: string;
   workspace_id: string;
@@ -146,7 +212,11 @@ export async function api<T = { ok: boolean }>(
   const result = await response.json().catch(() => ({}));
   if (!response.ok)
     throw new ApiError(
-      result.error ?? "Something went wrong. Try again.",
+      result.error ??
+        // The application is stopped (maintenance, or a guarded rollback): the proxy answers alone.
+        ([502, 503, 504].includes(response.status)
+          ? "Kodelumi is temporarily unavailable for maintenance. Please try again in a few minutes."
+          : "Something went wrong. Try again."),
       response.status,
     );
   return result;
@@ -168,6 +238,21 @@ export async function uploadImage(workspaceId: string, file: Blob, editorToken?:
   const result = await response.json().catch(() => ({}));
   if (!response.ok)
     throw new ApiError(result.error ?? "The image could not be added.", response.status);
+  return result as UploadedImage;
+}
+// A Live Coding session's own image (its owner and collaborators upload; viewers only read).
+export async function uploadLiveImage(sessionId: string, file: Blob) {
+  const response = await fetch(`/api/live/${sessionId}/images`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      "Content-Type": file.type || "application/octet-stream",
+      ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {}),
+    },
+    body: file,
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new ApiError(result.error ?? "The image could not be added.", response.status);
   return result as UploadedImage;
 }
 export const imageUrl = (workspaceId: string, imageId: string) =>

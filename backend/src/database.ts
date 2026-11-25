@@ -347,5 +347,95 @@ export function openDatabase(path: string) {
         `Image references reconciled with saved documents: ${result.removed} removed, ${result.added} added without access (provenance unknown).`,
       );
   }
+  migrateLocksAndLiveSessions(db);
   return db;
+}
+
+// Content locks and Live Coding sessions (additive: new tables only, nothing existing changes,
+// safe to run again). Without lock rows every workspace behaves exactly as before. Rolling back
+// to a release without these features leaves the tables unused: content stays as it is, but
+// that release does not enforce locks (see the rollback plan).
+export function migrateLocksAndLiveSessions(db: DatabaseSync) {
+  // One row per locked item. A file lock has no foreign key on purpose: file rows are rewritten
+  // on every save; file locks are removed with the file (and with its folder) by the server.
+  db.exec(`CREATE TABLE IF NOT EXISTS content_locks (
+      workspace_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+      target_kind TEXT NOT NULL CHECK (target_kind IN ('workspace','folder','file')),
+      target_id TEXT NOT NULL,
+      visibility TEXT NOT NULL DEFAULT 'visible' CHECK (visibility IN ('visible','hidden')),
+      release_at INTEGER,
+      release_zone TEXT,
+      created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+      PRIMARY KEY (workspace_id, target_kind, target_id)
+    );
+    CREATE INDEX IF NOT EXISTS content_locks_release ON content_locks(release_at) WHERE release_at IS NOT NULL;
+    CREATE TRIGGER IF NOT EXISTS folders_delete_locks AFTER DELETE ON folders
+    BEGIN DELETE FROM content_locks WHERE workspace_id=OLD.workspace_id AND target_kind='folder' AND target_id=OLD.id; END;
+    CREATE TABLE IF NOT EXISTS lock_permissions (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+      user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+      team_id TEXT REFERENCES teams(id) ON DELETE CASCADE,
+      folder_id TEXT REFERENCES folders(id) ON DELETE CASCADE,
+      can_manage INTEGER NOT NULL DEFAULT 1 CHECK (can_manage IN (0,1)),
+      can_schedule INTEGER NOT NULL DEFAULT 0 CHECK (can_schedule IN (0,1)),
+      can_access INTEGER NOT NULL DEFAULT 1 CHECK (can_access IN (0,1)),
+      created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+      created_at INTEGER NOT NULL,
+      CHECK ((user_id IS NULL) <> (team_id IS NULL))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS lock_permissions_unique
+      ON lock_permissions(workspace_id, COALESCE(user_id,''), COALESCE(team_id,''), COALESCE(folder_id,''));
+    CREATE INDEX IF NOT EXISTS lock_permissions_user ON lock_permissions(user_id);
+    CREATE TABLE IF NOT EXISTS lock_events (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+      target_kind TEXT NOT NULL, target_id TEXT NOT NULL, target_name TEXT NOT NULL,
+      action TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '',
+      actor_id TEXT REFERENCES users(id) ON DELETE SET NULL, actor_name TEXT, actor_kind TEXT,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS lock_events_target ON lock_events(workspace_id, target_kind, target_id, created_at DESC);`);
+  // Live Coding sessions: their own live document (never part of a workspace), their own
+  // images, an unguessable revocable link (stored as a hash, sealed for re-display) and
+  // explicitly invited collaborators.
+  db.exec(`CREATE TABLE IF NOT EXISTS live_sessions (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+      workspace_id TEXT REFERENCES rooms(id) ON DELETE SET NULL,
+      folder_id TEXT REFERENCES folders(id) ON DELETE SET NULL,
+      status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','live','paused','ended','archived')),
+      viewer_access TEXT NOT NULL DEFAULT 'anyone' CHECK (viewer_access IN ('anyone','signed_in','invited')),
+      after_end TEXT NOT NULL DEFAULT 'closed' CHECK (after_end IN ('closed','available')),
+      allow_download INTEGER NOT NULL DEFAULT 1 CHECK (allow_download IN (0,1)),
+      link_hash TEXT, link_sealed TEXT, link_expires_at INTEGER,
+      state BLOB NOT NULL,
+      -- While paused: what viewers have (they catch up from it on resume).
+      paused_state BLOB,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+      started_at INTEGER, ended_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS live_sessions_owner ON live_sessions(owner_id, updated_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS live_sessions_link ON live_sessions(link_hash) WHERE link_hash IS NOT NULL;
+    CREATE TABLE IF NOT EXISTS live_session_members (
+      session_id TEXT NOT NULL REFERENCES live_sessions(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      role TEXT NOT NULL CHECK (role IN ('editor','viewer')),
+      created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (session_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS live_session_members_user ON live_session_members(user_id);
+    CREATE TABLE IF NOT EXISTS live_images (
+      id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES live_sessions(id) ON DELETE CASCADE,
+      mime TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL,
+      size INTEGER NOT NULL, sha256 TEXT NOT NULL, created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS live_images_session ON live_images(session_id);
+    CREATE TABLE IF NOT EXISTS live_image_chunks (
+      image_id TEXT NOT NULL REFERENCES live_images(id) ON DELETE CASCADE,
+      seq INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY (image_id, seq)
+    );`);
 }

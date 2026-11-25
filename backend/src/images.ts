@@ -83,31 +83,64 @@ export function sniffImage(data: Buffer): ImageInfo {
   return info;
 }
 
+// Where images are kept: workspace images (the default), or a Live Coding session's own images
+// (live_images, owned by session_id), with their own total limit.
+export type ImageTables = { images: string; chunks: string; owner: string; limit: number; full: string };
+const WORKSPACE_TABLES: ImageTables = {
+  images: "images",
+  chunks: "image_chunks",
+  owner: "workspace_id",
+  limit: MAX_WORKSPACE_IMAGE_BYTES,
+  full: "This workspace has reached its 250 MB image limit.",
+};
+export const LIVE_IMAGE_TABLES: ImageTables = {
+  images: "live_images",
+  chunks: "live_image_chunks",
+  owner: "session_id",
+  limit: 100 * 1024 * 1024,
+  full: "This session has reached its 100 MB image limit.",
+};
 export class Images {
-  constructor(private db: DatabaseSync) {}
+  constructor(
+    private db: DatabaseSync,
+    private tables: ImageTables = WORKSPACE_TABLES,
+  ) {}
   used(workspaceId: string) {
     return Number(
       this.db
-        .prepare("SELECT COALESCE(SUM(size),0) AS n FROM images WHERE workspace_id=?")
+        .prepare(`SELECT COALESCE(SUM(size),0) AS n FROM ${this.tables.images} WHERE ${this.tables.owner}=?`)
         .get(workspaceId)?.n,
     );
+  }
+  // An image's original bytes (to copy it elsewhere, e.g. saving a session into a workspace).
+  bytes(ownerId: string, imageId: string) {
+    if (!IMAGE_ID.test(imageId)) return undefined;
+    const image = this.db
+      .prepare(`SELECT size FROM ${this.tables.images} WHERE id=? AND ${this.tables.owner}=?`)
+      .get(imageId, ownerId);
+    if (!image) return undefined;
+    const parts = this.db
+      .prepare(`SELECT data FROM ${this.tables.chunks} WHERE image_id=? ORDER BY seq`)
+      .all(imageId)
+      .map((row) => Buffer.from(row.data as Uint8Array));
+    return Buffer.concat(parts);
   }
   store(workspaceId: string, data: Buffer) {
     if (!data.length) throw httpError("The image is empty.");
     if (data.length > MAX_IMAGE_BYTES) throw httpError("Images can be up to 15 MB.", 413);
     const info = sniffImage(data);
-    if (this.used(workspaceId) + data.length > MAX_WORKSPACE_IMAGE_BYTES)
-      throw httpError("This workspace has reached its 250 MB image limit.", 413);
+    if (this.used(workspaceId) + data.length > this.tables.limit)
+      throw httpError(this.tables.full, 413);
     const id = randomBytes(16).toString("base64url");
     const sha256 = createHash("sha256").update(data).digest("hex");
     const insertChunk = this.db.prepare(
-      "INSERT INTO image_chunks (image_id,seq,data) VALUES (?,?,?)",
+      `INSERT INTO ${this.tables.chunks} (image_id,seq,data) VALUES (?,?,?)`,
     );
     this.db.exec("BEGIN");
     try {
       this.db
         .prepare(
-          "INSERT INTO images (id,workspace_id,mime,width,height,size,sha256,created_at) VALUES (?,?,?,?,?,?,?,?)",
+          `INSERT INTO ${this.tables.images} (id,${this.tables.owner},mime,width,height,size,sha256,created_at) VALUES (?,?,?,?,?,?,?,?)`,
         )
         .run(id, workspaceId, info.mime, info.width, info.height, data.length, sha256, Date.now());
       for (let seq = 0; seq * CHUNK < data.length; seq++)
@@ -124,7 +157,7 @@ export class Images {
   serve(workspaceId: string, imageId: string, res: Response, etagHeader?: string) {
     const image = IMAGE_ID.test(imageId)
       ? this.db
-          .prepare("SELECT mime,size,sha256 FROM images WHERE id=? AND workspace_id=?")
+          .prepare(`SELECT mime,size,sha256 FROM ${this.tables.images} WHERE id=? AND ${this.tables.owner}=?`)
           .get(imageId, workspaceId)
       : undefined;
     if (!image) {
@@ -147,7 +180,7 @@ export class Images {
     }
     res.setHeader("Content-Length", String(image.size));
     const chunk = this.db.prepare(
-      "SELECT data FROM image_chunks WHERE image_id=? AND seq=?",
+      `SELECT data FROM ${this.tables.chunks} WHERE image_id=? AND seq=?`,
     );
     let seq = 0;
     const next = () => {

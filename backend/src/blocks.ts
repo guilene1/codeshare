@@ -38,7 +38,7 @@ export function orderedBlocks(doc: Y.Doc) {
 // Everything a lesson holds (files plus code blocks) after writing `content`, excluding the
 // file or block it replaces. Shared by the file, code block and content-update APIs.
 export function validateLessonCapacity(
-  room: Room,
+  room: Pick<Room, "doc">,
   content: string,
   replacing: { fileId?: string; blockId?: string } = {},
 ) {
